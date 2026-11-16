@@ -132,34 +132,7 @@ is_running() {
 # ============================================
 
 restore_firewall() {
-
-    log_info "Checking firewall backups..."
-
-    local backup_dir="$ONIONGATE_DIR/backup"
-
-    if command -v iptables-restore >/dev/null 2>&1 &&
-       [[ -f "$backup_dir/iptables.rules.backup" ]]; then
-
-        if iptables-restore < "$backup_dir/iptables.rules.backup"; then
-            log_success "IPv4 firewall rules restored."
-        else
-            log_error "IPv4 firewall restoration failed."
-        fi
-    else
-        log_warning "IPv4 firewall backup unavailable. Leaving current rules unchanged."
-    fi
-
-    if command -v ip6tables-restore >/dev/null 2>&1 &&
-       [[ -f "$backup_dir/ip6tables.rules.backup" ]]; then
-
-        if ip6tables-restore < "$backup_dir/ip6tables.rules.backup"; then
-            log_success "IPv6 firewall rules restored."
-        else
-            log_error "IPv6 firewall restoration failed."
-        fi
-    else
-        log_warning "IPv6 firewall backup unavailable. Leaving current rules unchanged."
-    fi
+    log_info "No full firewall snapshots are restored; OnionGate stop removes only its tagged rules."
 }
 
 # ============================================
@@ -167,59 +140,7 @@ restore_firewall() {
 # ============================================
 
 restore_network_settings() {
-
-    local backup_dir="$ONIONGATE_DIR/backup"
-
-    log_info "Restoring network settings..."
-
-    # Restore IPv6 only if OnionGate saved the original values.
-    if [[ -f "$backup_dir/ipv6_all.backup" ]]; then
-        local ipv6_all
-        ipv6_all="$(<"$backup_dir/ipv6_all.backup")"
-
-        sysctl -w "net.ipv6.conf.all.disable_ipv6=$ipv6_all" \
-            >/dev/null 2>&1 ||
-            log_warning "Could not restore IPv6 all setting."
-    fi
-
-    if [[ -f "$backup_dir/ipv6_default.backup" ]]; then
-        local ipv6_default
-        ipv6_default="$(<"$backup_dir/ipv6_default.backup")"
-
-        sysctl -w "net.ipv6.conf.default.disable_ipv6=$ipv6_default" \
-            >/dev/null 2>&1 ||
-            log_warning "Could not restore IPv6 default setting."
-    fi
-
-    # Restore DNS configuration.
-    if [[ -f "$backup_dir/resolv.conf.backup" ]]; then
-
-        chattr -i /etc/resolv.conf 2>/dev/null || true
-
-        if cp -a "$backup_dir/resolv.conf.backup" /etc/resolv.conf; then
-            log_success "DNS configuration restored."
-        else
-            log_error "DNS configuration restoration failed."
-        fi
-    else
-        log_warning "DNS backup unavailable. Leaving current DNS configuration unchanged."
-    fi
-
-    # Restore Tor configuration.
-    if [[ -f "$backup_dir/torrc.backup" ]]; then
-
-        local torrc_path="/etc/tor/torrc"
-
-        if [[ -d /etc/tor ]]; then
-            if cp -a "$backup_dir/torrc.backup" "$torrc_path"; then
-                log_success "Tor configuration restored."
-            else
-                log_error "Tor configuration restoration failed."
-            fi
-        else
-            log_warning "Tor configuration directory not found."
-        fi
-    fi
+    log_info "OnionGate does not modify /etc/resolv.conf, system Tor configuration, or IPv6 sysctls."
 }
 
 # ============================================
@@ -227,36 +148,7 @@ restore_network_settings() {
 # ============================================
 
 restore_mac_addresses() {
-
-    local backup_file="$ONIONGATE_DIR/backup/mac_addresses.backup"
-
-    if [[ ! -f "$backup_file" ]]; then
-        log_warning "MAC address backup unavailable. Skipping."
-        return
-    fi
-
-    log_info "Restoring network interface addresses..."
-
-    while IFS=: read -r iface mac; do
-
-        [[ -n "$iface" && -n "$mac" ]] || continue
-
-        if ! ip link show dev "$iface" >/dev/null 2>&1; then
-            log_warning "Interface $iface no longer exists."
-            continue
-        fi
-
-        ip link set "$iface" down 2>/dev/null || true
-
-        if ip link set "$iface" address "$mac"; then
-            log_success "Restored interface: $iface"
-        else
-            log_warning "Could not restore interface: $iface"
-        fi
-
-        ip link set "$iface" up 2>/dev/null || true
-
-    done < "$backup_file"
+    log_info "MAC addresses are restored by the OnionGate stop command when a run enabled spoofing."
 }
 
 # ============================================
@@ -264,17 +156,7 @@ restore_mac_addresses() {
 # ============================================
 
 stop_oniongate() {
-
-    if ! is_running; then
-        log_info "OnionGate is not marked as running."
-        return
-    fi
-
-    log_warning "OnionGate is currently running."
-    log_info "Stopping OnionGate..."
-
     if [[ -x "$INSTALL_BIN" ]]; then
-
         if "$INSTALL_BIN" stop; then
             log_success "OnionGate stop command completed."
         else
@@ -282,9 +164,11 @@ stop_oniongate() {
             die "Cannot safely continue uninstall while network state may be active."
         fi
 
-    else
+    elif is_running; then
         log_error "OnionGate executable is missing."
         die "Cannot safely restore network state without the application's stop command."
+    else
+        log_warning "OnionGate CLI is unavailable; no system-wide firewall or network restore will be attempted."
     fi
 
     if is_running; then
@@ -299,14 +183,9 @@ stop_oniongate() {
 # ============================================
 
 restore_backups() {
-
-    log_info "Restoring saved system settings..."
-
     restore_firewall
     restore_network_settings
     restore_mac_addresses
-
-    log_success "Backup restoration process completed."
 }
 
 # ============================================
@@ -354,6 +233,8 @@ remove_gui() {
     log_info "Removing OnionGate GUI application files..."
     rm -f -- /usr/local/bin/oniongate-gui
     rm -f -- /usr/local/share/applications/oniongate.desktop
+    rm -f -- /usr/local/lib/oniongate/tor_control.py
+    rmdir /usr/local/lib/oniongate 2>/dev/null || true
     rm -rf -- /opt/oniongate/gui /opt/oniongate/venv /opt/oniongate/assets
     rmdir /opt/oniongate 2>/dev/null || true
     log_success "GUI application files removed."
@@ -364,46 +245,7 @@ remove_gui() {
 # ============================================
 
 restore_tor_service() {
-
-    log_info "Checking Tor system service..."
-
-    if ! command -v systemctl >/dev/null 2>&1; then
-        log_warning "systemctl unavailable. Skipping."
-        return
-    fi
-
-    if ! systemctl is-system-running >/dev/null 2>&1; then
-        log_warning "Systemd is not fully available. Skipping."
-        return
-    fi
-
-    # Only restore the service if the installer saved its original state.
-    local service_backup="$ONIONGATE_DIR/backup/tor_service_state.backup"
-
-    if [[ ! -f "$service_backup" ]]; then
-        log_warning "Original Tor service state was not saved."
-        log_info "Not enabling or starting Tor automatically."
-        return
-    fi
-
-    local original_state
-    original_state="$(<"$service_backup")"
-
-    case "$original_state" in
-        enabled)
-            systemctl enable tor.service ||
-                log_warning "Could not enable tor.service."
-            ;;
-        disabled)
-            systemctl disable tor.service ||
-                log_warning "Could not disable tor.service."
-            ;;
-        *)
-            log_warning "Unknown previous Tor service state."
-            ;;
-    esac
-
-    log_success "Tor service state restoration completed."
+    log_info "Tor system service state is left unchanged."
 }
 
 # ============================================
@@ -425,15 +267,6 @@ main() {
     echo ""
 
     stop_oniongate
-
-    echo ""
-
-    # Restore only when backups exist.
-    if [[ -d "$ONIONGATE_DIR/backup" ]]; then
-        restore_backups
-    else
-        log_warning "No OnionGate backups found."
-    fi
 
     echo ""
 

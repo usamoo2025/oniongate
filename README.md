@@ -41,6 +41,7 @@ OnionGate aims to support both Debian-based and Arch-based Linux distributions.
 - **Bridge Support:** Direct, obfs4, Snowflake and meek_lite modes.
 - **Country Preferences:** Configure preferred Tor exit countries.
 - **Connection Management:** Start and stop the gateway through the GUI with user confirmation.
+- **Circuit Refresh:** Request Tor's `NEWNYM` signal through cookie-authenticated ControlPort.
 - **Diagnostics:** Check Tor, dependencies, configuration and runtime status.
 - **Dark and Light Themes:** Choose your preferred interface appearance.
 - **Linux Compatibility:** Designed for Debian- and Arch-family distributions.
@@ -69,6 +70,8 @@ Compatibility targets are documented, but live runtime verification on Debian an
 - curl
 - iproute2
 - iptables
+- dnsutils (`dig`)
+- Python 3 (Tor ControlPort helper)
 - ca-certificates
 - util-linux
 - Root privileges for installation and gateway-changing operations
@@ -96,23 +99,23 @@ cd oniongate
 chmod +x install.sh
 ```
 
-### 3. Install OnionGate CLI
+### 3. Install OnionGate
 
 ```bash
 sudo ./install.sh
 ```
 
-The installer detects the distribution family and uses the appropriate package manager.
+The installer detects the distribution family and uses the appropriate package manager. It installs the CLI and attempts to install the GUI and its dependencies. If GUI dependencies are unavailable, the CLI installation remains usable.
 
-### 4. Install the optional GUI
+To install only the CLI:
 
 ```bash
-sudo ./install.sh --with-gui
+sudo ./install.sh --without-gui
 ```
 
-This installs the PySide6 GUI dependencies in `/opt/oniongate/venv` and adds the desktop launcher.
+When a distribution PySide6 package is unavailable, the installer tries a dedicated virtual environment at `/opt/oniongate/venv`. The GUI launcher and desktop application entry are installed when GUI setup succeeds.
 
-### 5. Launch OnionGate
+### 4. Launch OnionGate
 
 CLI:
 
@@ -138,7 +141,7 @@ The GUI works alongside the existing Bash backend rather than implementing a sep
 
 | Page | Description |
 |---|---|
-| Dashboard | Connection status and connection controls |
+| Dashboard | Verified connection status, connection controls and circuit refresh |
 | Locations | Country exit preferences |
 | Connection | Connection information and management |
 | Bridges | Bridge selection and availability |
@@ -173,6 +176,16 @@ sudo oniongate start --country de
 ```
 
 A country preference does not guarantee that a working exit relay is available in that country.
+
+### Request a New Circuit
+
+Use the dashboard's **Refresh circuit** button or run:
+
+```bash
+sudo oniongate refresh
+```
+
+This sends Tor's authenticated `NEWNYM` control signal without restarting Tor or changing firewall rules. A new circuit is used when available, but it does not guarantee a different public exit IP; existing connections remain on their current circuits.
 
 ### Bridge Selection
 
@@ -237,9 +250,19 @@ sudo oniongate start -o --country nl
 sudo oniongate start -v
 sudo oniongate status
 sudo oniongate stop
+sudo oniongate restart
+sudo oniongate refresh
 oniongate version
 oniongate help
 ```
+
+### Request a New Tor Circuit
+
+```bash
+sudo oniongate refresh
+```
+
+OnionGate authenticates to Tor's loopback ControlPort using its cookie and requests `NEWNYM`; it does not restart Tor or alter firewall rules. A new circuit does **not** guarantee a different public exit IP, and existing connections are not transferred to the new circuit. Tor may also reject requests during its cooldown.
 
 Optional MAC changes:
 
@@ -290,15 +313,17 @@ ONIONGATE6_OUT
 
 These chains are intended to keep OnionGate's firewall rules separate from unrelated rules.
 
-The backend handles DNS redirection, supported TCP traffic and restrictions on unsupported outbound traffic.
+The backend redirects UDP DNS queries to Tor's DNSPort, routes TCP (including DNS-over-TCP) through Tor's TransPort, and blocks unsupported non-local outbound traffic while active. Other UDP traffic is not routed through Tor. Local DHCP and IPv6 neighbor/router discovery control packets are allowed so network configuration can continue.
 
 ### Important Limitations
 
 - Not every UDP application is supported through Tor.
+- Non-DNS UDP traffic is not routed through Tor and is blocked by OnionGate's outbound rules while active.
 - Private and local destinations may bypass Tor.
 - Applications using independent encrypted DNS may not follow system DNS redirection.
 - Other VPN software or custom routing rules may conflict.
 - A successful Tor connection does not prove every application is using Tor.
+- OnionGate removes only its tagged rules; it does not flush firewall tables or change `/etc/resolv.conf` or global IPv6 settings.
 
 OnionGate does not guarantee that all system traffic is routed through Tor.
 
@@ -359,6 +384,18 @@ sudo tail -n 50 /etc/oniongate/tor.log
 ```bash
 sudo oniongate stop
 ```
+
+---
+
+## 🧪 Testing
+
+The repository includes mock ControlPort protocol tests:
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+Linux integration checks requiring a running Tor daemon, DNSPort, firewall tools, or an installed Debian/Arch package manager must be run on those Linux systems. They have not been verified in this Windows development environment.
 
 ---
 

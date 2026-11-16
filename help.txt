@@ -33,7 +33,9 @@ COMMANDS
 
     start           Start OnionGate (direct connection by default)
     stop            Stop OnionGate and remove its managed rules
+    restart         Stop and start OnionGate
     status          Show OnionGate status
+    refresh         Request a new Tor circuit through the ControlPort
     version         Show version information
     help            Display this help
     uninstall       Remove OnionGate from the system
@@ -61,6 +63,7 @@ EXAMPLES
 --------
 
     sudo oniongate start              # Direct Tor connection
+    sudo oniongate restart            # Restart the managed gateway
     sudo oniongate start -o           # obfs4 bridge
     sudo oniongate start -s           # Snowflake bridge
     sudo oniongate start -m           # meek_lite bridge
@@ -70,8 +73,13 @@ EXAMPLES
     sudo oniongate start --spoof-mac  # Enable MAC spoofing
     sudo oniongate stop               # Stop OnionGate
     sudo oniongate status             # Check status
+    sudo oniongate refresh            # Request a new Tor circuit
     oniongate version                 # Display version
     oniongate help                    # Display help
+
+    A new circuit does not guarantee a different public exit IP.
+    Tor may reuse an exit relay, and existing connections are not
+    moved to the new circuit.
 
 
 FEATURES
@@ -241,17 +249,14 @@ HOW IT WORKS
 
     2. Remove its own firewall rules.
 
-    3. Restore applicable settings using available backups.
-
-    4. Restore normal network connectivity where possible.
+    3. Restore an explicitly changed MAC address, if requested.
 
     NOTE:
-    OnionGate manages its own firewall chains and avoids deliberately
-    flushing unrelated system firewall rules.
+    OnionGate removes only its tagged firewall rules and does not
+    flush unrelated system firewall rules.
 
-    DNS resolver files are not intentionally overwritten or locked.
-    IPv6 is restricted through firewall rules rather than being
-    globally disabled.
+    OnionGate does not modify /etc/resolv.conf or globally disable IPv6.
+    IPv6 output is restricted by OnionGate-owned firewall rules.
 
 
 SECURITY NOTES
@@ -355,7 +360,7 @@ FILES
 
     /etc/oniongate/backup/            Backup directory
 
-    /var/lib/oniongate/               Tor data directory
+    /etc/oniongate/data/              Tor data directory
 
 
 FIREWALL CHAINS

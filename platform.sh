@@ -33,11 +33,11 @@ install_base_dependencies() {
 
     case "$PKG_FAMILY" in
         debian)
-            apt-get update
-            apt-get install -y tor curl iptables
+            apt-get update || return 1
+            apt-get install -y tor curl dnsutils python3 iproute2 iptables ca-certificates util-linux || return 1
             ;;
         arch)
-            pacman -Syu --needed --noconfirm tor curl iptables
+            pacman -Syu --needed --noconfirm tor curl bind-tools python iproute2 iptables ca-certificates util-linux || return 1
             ;;
     esac
 }
@@ -53,26 +53,28 @@ detect_tor_account() {
     fi
 
     TOR_UID="$(id -u "$TOR_USER")"
-    export TOR_USER TOR_UID
+    TOR_GROUP="$(id -gn "$TOR_USER")"
+    export TOR_USER TOR_UID TOR_GROUP
 }
 
 run_as_tor() {
+    if [[ -z "$TOR_USER" ]]; then
+        detect_tor_account || return 1
+    fi
     if ! id "$TOR_USER" >/dev/null 2>&1; then
         echo "Invalid Tor account: $TOR_USER"
         return 1
     fi
+    command -v runuser >/dev/null 2>&1 || {
+        echo "The runuser utility was not found."
+        return 1
+    }
 
     runuser -u "$TOR_USER" -- "$@"
 }
 
 detect_torrc() {
-    if [[ -f /etc/tor/torrc ]]; then
-        TORRC_FILE="/etc/tor/torrc"
-    else
-        echo "Tor configuration file not found: /etc/tor/torrc"
-        return 1
-    fi
+    TORRC_FILE="/etc/oniongate/torrc"
 
     export TORRC_FILE
 }
-
