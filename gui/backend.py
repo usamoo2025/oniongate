@@ -167,7 +167,7 @@ class BackendClient:
     def help(self) -> CommandResult:
         return self._invoke("help")
 
-    def status(self, timeout: float = 12) -> tuple[CommandResult, RuntimeStatus]:
+    def status(self, timeout: float = 45) -> tuple[CommandResult, RuntimeStatus]:
         result = self._invoke("status", timeout=timeout)
         if result.error is not None or result.returncode is None:
             return result, RuntimeStatus(

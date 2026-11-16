@@ -176,7 +176,19 @@ class DashboardPage(QWidget):
         center.addWidget(recent)
         self.refresh_button = QPushButton("Refresh checks")
         self.refresh_button.setObjectName("PrimaryButton")
-        center.addWidget(self.refresh_button, 0, Qt.AlignmentFlag.AlignRight)
+        self.circuit_refresh_button = QPushButton("Refresh circuit")
+        self.circuit_refresh_button.setObjectName("SecondaryButton")
+        refresh_actions = QHBoxLayout()
+        refresh_actions.addWidget(self.circuit_refresh_button)
+        refresh_actions.addStretch()
+        refresh_actions.addWidget(self.refresh_button)
+        center.addLayout(refresh_actions)
+        self.circuit_refresh_status = QLabel(
+            "A new circuit may use the same public exit IP."
+        )
+        self.circuit_refresh_status.setObjectName("MutedText")
+        self.circuit_refresh_status.setWordWrap(True)
+        center.addWidget(self.circuit_refresh_status)
         root.addLayout(center, 2)
 
         health_panel = QFrame()

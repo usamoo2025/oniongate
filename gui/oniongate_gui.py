@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import os
+import re
 import sys
 from datetime import datetime
 
@@ -101,6 +103,12 @@ class OnionGateWindow(QMainWindow):
         self._bridge_available: dict[str, tuple[bool, str]] = {}
         self.duration_timer = QTimer(self)
         self.duration_timer.timeout.connect(self._update_duration)
+        self.circuit_refresh_remaining = 0
+        self.circuit_refresh_timer = QTimer(self)
+        self.circuit_refresh_timer.setInterval(1000)
+        self.circuit_refresh_timer.timeout.connect(
+            self._circuit_refresh_cooldown_tick
+        )
         self.setWindowTitle("OnionGate")
         self.setMinimumSize(900, 640)
         self.resize(1240, 820)
@@ -113,6 +121,9 @@ class OnionGateWindow(QMainWindow):
         )
         self.connection_manager.status_verified.connect(self._status_verified)
         self.connection_manager.operation_error.connect(self._connection_error)
+        self.connection_manager.circuit_refresh_finished.connect(
+            self._circuit_refresh_finished
+        )
         self.refresh_diagnostics()
 
     def _build_interface(self) -> None:
@@ -176,6 +187,9 @@ class OnionGateWindow(QMainWindow):
         ):
             self.pages.addWidget(page)
         self.dashboard_page.refresh_button.clicked.connect(self.refresh_diagnostics)
+        self.dashboard_page.circuit_refresh_button.clicked.connect(
+            self._request_circuit_refresh
+        )
         self.dashboard_page.connection_button.clicked.connect(
             self._handle_connection_button
         )
@@ -591,6 +605,12 @@ class OnionGateWindow(QMainWindow):
             state in ("Not Connected", "Connected", "Connection error")
             and self.connection_manager.can_manage
         )
+        self.dashboard_page.circuit_refresh_button.setEnabled(
+            self.connection_manager.is_active
+            and self.connection_manager.can_manage
+            and self.connection_manager.operation is None
+            and self.circuit_refresh_remaining == 0
+        )
         self.connection_page.button.setEnabled(
             state in ("Not Connected", "Connected", "Connection error")
             and self.connection_manager.can_manage
@@ -731,11 +751,109 @@ class OnionGateWindow(QMainWindow):
         self._set_connection_state("Connection error", detail, "bad")
         self._notify("OnionGate connection error", detail[:250])
 
+    def _request_circuit_refresh(self) -> None:
+        self.dashboard_page.circuit_refresh_button.setEnabled(False)
+        self.dashboard_page.circuit_refresh_status.setText(
+            "Requesting a new Tor circuit…"
+        )
+        self.connection_manager.refresh_circuit()
+
+    def _circuit_refresh_finished(
+        self,
+        detail: str,
+        succeeded: bool,
+        cooldown_seconds: int,
+    ) -> None:
+        cleaned = re.sub(r"\x1b\[[0-9;]*m", "", detail).replace("\r", "\n")
+        lines = [
+            line.strip()
+            for line in cleaned.splitlines()
+            if line.strip() and "OnionGate" not in line[:30]
+        ]
+        if succeeded:
+            message = (
+                "Tor accepted the new circuit request. New circuits will be used "
+                "when available. A new circuit does not guarantee a different "
+                "public exit IP."
+            )
+        else:
+            relevant = [
+                line
+                for line in lines
+                if any(
+                    keyword in line.lower()
+                    for keyword in (
+                        "cooldown",
+                        "wait",
+                        "controlport",
+                        "cookie",
+                        "authentication",
+                        "not running",
+                        "not configured",
+                        "rejected",
+                        "could not",
+                        "cannot",
+                    )
+                )
+            ]
+            message = " ".join(relevant[-2:] or lines[-2:])
+            if not message:
+                message = "Circuit refresh failed. Check OnionGate status and logs."
+        self.dashboard_page.circuit_refresh_status.setText(message)
+        self.dashboard_page.circuit_refresh_status.setProperty(
+            "tone", "good" if succeeded else "warning"
+        )
+        self.dashboard_page.circuit_refresh_status.style().unpolish(
+            self.dashboard_page.circuit_refresh_status
+        )
+        self.dashboard_page.circuit_refresh_status.style().polish(
+            self.dashboard_page.circuit_refresh_status
+        )
+
+        self.circuit_refresh_remaining = max(0, cooldown_seconds)
+        if self.circuit_refresh_remaining:
+            self.dashboard_page.circuit_refresh_button.setEnabled(False)
+            self._update_circuit_refresh_button()
+            self.circuit_refresh_timer.start()
+        else:
+            self.dashboard_page.circuit_refresh_button.setText("Refresh circuit")
+            self.dashboard_page.circuit_refresh_button.setEnabled(
+                self.connection_manager.is_active
+                and self.connection_manager.can_manage
+            )
+
+    def _update_circuit_refresh_button(self) -> None:
+        self.dashboard_page.circuit_refresh_button.setText(
+            f"Refresh circuit ({self.circuit_refresh_remaining}s)"
+        )
+
+    def _circuit_refresh_cooldown_tick(self) -> None:
+        self.circuit_refresh_remaining = max(
+            0, self.circuit_refresh_remaining - 1
+        )
+        if self.circuit_refresh_remaining:
+            self._update_circuit_refresh_button()
+            return
+        self.circuit_refresh_timer.stop()
+        self.dashboard_page.circuit_refresh_button.setText("Refresh circuit")
+        self.dashboard_page.circuit_refresh_button.setEnabled(
+            self.connection_manager.is_active
+            and self.connection_manager.can_manage
+        )
+
     def _notify(self, title: str, message: str) -> None:
         if self.notifications_enabled and self.tray_icon is not None:
             self.tray_icon.showMessage(title, message)
 
     def closeEvent(self, event: QCloseEvent) -> None:
+        if self.worker is not None and self.worker.isRunning():
+            QMessageBox.information(
+                self,
+                "Diagnostics in progress",
+                "Wait for the background diagnostics to finish before closing the GUI.",
+            )
+            event.ignore()
+            return
         if (
             self.connection_manager.process.state()
             != QProcess.ProcessState.NotRunning
@@ -755,6 +873,9 @@ class OnionGateWindow(QMainWindow):
         self.dashboard_page.duration_value.setText(f"Verified for  {duration}")
 
 def main() -> int:
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        print("Do not launch the OnionGate graphical application as root.", file=sys.stderr)
+        return 1
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
     app.setOrganizationName(APP_NAME)

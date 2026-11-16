@@ -44,6 +44,7 @@ class ConnectionManager(QObject):
     bootstrap_progress = Signal(int)
     status_verified = Signal(object)
     operation_error = Signal(str)
+    circuit_refresh_finished = Signal(str, bool, int)
 
     def __init__(
         self,
@@ -118,6 +119,30 @@ class ConnectionManager(QObject):
             timeout_ms=45_000,
         )
 
+    def refresh_circuit(self) -> None:
+        if not self._ensure_idle():
+            return
+        if not self.is_active:
+            self.circuit_refresh_finished.emit(
+                "OnionGate is not running. Start the gateway before refreshing its circuit.",
+                False,
+                0,
+            )
+            return
+        if not self.can_manage:
+            self.circuit_refresh_finished.emit(
+                "Circuit refresh requires the OnionGate CLI and pkexec.",
+                False,
+                0,
+            )
+            return
+        self._launch(
+            "refresh",
+            self.pkexec_path or "pkexec",
+            [str(self.backend_path), "refresh"],
+            timeout_ms=20_000,
+        )
+
     def _ensure_idle(self) -> bool:
         if self.process.state() != QProcess.ProcessState.NotRunning:
             self.operation_error.emit("An OnionGate operation is already running.")
@@ -176,9 +201,27 @@ class ConnectionManager(QObject):
             return
         self.operation = None
         if self._timed_out:
-            self.operation_error.emit(
+            message = (
                 "The operation timed out. Check OnionGate status and logs before retrying."
             )
+            if operation == "refresh":
+                self.circuit_refresh_finished.emit(message, False, 0)
+            else:
+                self.operation_error.emit(message)
+        elif operation == "refresh":
+            succeeded = (
+                exit_code == 0
+                and exit_status == QProcess.ExitStatus.NormalExit
+            )
+            cooldown = self._refresh_cooldown(self._output)
+            if succeeded:
+                cooldown = max(10, cooldown)
+            elif "cooldown" in self._output.lower():
+                cooldown = max(10, cooldown)
+            detail = self._output.strip() or (
+                f"Circuit refresh command exited with status {exit_code}."
+            )
+            self.circuit_refresh_finished.emit(detail[-3000:], succeeded, cooldown)
         elif operation in ("verify_connect", "verify_disconnect"):
             if exit_status == QProcess.ExitStatus.CrashExit:
                 self.operation_error.emit(
@@ -208,7 +251,7 @@ class ConnectionManager(QObject):
             verification,
             str(self.backend_path),
             ["status"],
-            timeout_ms=15_000,
+            timeout_ms=45_000,
         )
 
     def _complete_verification(self, operation: str) -> None:
@@ -239,9 +282,22 @@ class ConnectionManager(QObject):
             self.timeout_timer.stop()
             operation = self.operation
             self.operation = None
-            self.operation_error.emit(
+            message = (
                 f"Could not start the {operation} command: {self.process.errorString()}"
             )
+            if operation == "refresh":
+                self.circuit_refresh_finished.emit(message, False, 0)
+            else:
+                self.operation_error.emit(message)
+
+    @staticmethod
+    def _refresh_cooldown(output: str) -> int:
+        match = re.search(
+            r"cooldown:[^0-9]*(\d+)\s*seconds?",
+            output,
+            re.IGNORECASE,
+        )
+        return int(match.group(1)) if match else 0
 
     def _on_timeout(self) -> None:
         if self.process.state() == QProcess.ProcessState.NotRunning:
