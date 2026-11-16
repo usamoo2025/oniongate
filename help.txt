@@ -1,0 +1,434 @@
+```text
+============================================================
+                         ONIONGATE
+                  OPEN-SOURCE TOR GATEWAY
+============================================================
+
+DESCRIPTION
+-----------
+
+OnionGate is a Linux-based Tor gateway that configures supported
+network traffic to use the Tor network.
+
+It provides transparent TCP proxying, DNS redirection, firewall
+management, bridge support, and optional MAC address spoofing.
+
+OnionGate supports Debian-based and Arch-based Linux distributions.
+
+IMPORTANT:
+OnionGate does not guarantee that ALL system traffic is routed
+through Tor. Unsupported protocols, private/local destinations,
+and applications using independent network paths may behave
+differently.
+
+
+USAGE
+-----
+
+    sudo oniongate <command> [options]
+
+
+COMMANDS
+--------
+
+    start           Start OnionGate (direct connection by default)
+    stop            Stop OnionGate and remove its managed rules
+    status          Show OnionGate status
+    version         Show version information
+    help            Display this help
+    uninstall       Remove OnionGate from the system
+
+
+OPTIONS (used with start)
+-------------------------
+
+    -o, --obfs4     Use obfs4 bridge
+    -s, --snowflake  Use Snowflake bridge
+    -m, --meek       Use meek_lite bridge
+    -v, --verbose    Show additional Tor log output
+
+    --spoof-mac      Enable optional MAC address spoofing
+
+    Options can be combined:
+
+        sudo oniongate start -o -v
+
+        Starts OnionGate using obfs4 with verbose output.
+
+
+EXAMPLES
+--------
+
+    sudo oniongate start              # Direct Tor connection
+    sudo oniongate start -o           # obfs4 bridge
+    sudo oniongate start -s           # Snowflake bridge
+    sudo oniongate start -m           # meek_lite bridge
+    sudo oniongate start -o -v        # obfs4 with verbose output
+    sudo oniongate start --spoof-mac  # Enable MAC spoofing
+    sudo oniongate stop               # Stop OnionGate
+    sudo oniongate status             # Check status
+    oniongate version                 # Display version
+    oniongate help                    # Display help
+
+
+FEATURES
+--------
+
+    - Transparent proxy configuration for supported TCP traffic
+    - DNS redirection through Tor DNSPort
+    - Firewall restrictions for supported outbound traffic
+    - OnionGate-specific firewall chains
+    - Tor bridge support (obfs4, Snowflake, meek_lite)
+    - Optional MAC address spoofing
+    - IPv6 firewall restrictions
+    - Automatic dependency detection
+    - Debian-based distribution support
+    - Arch-based distribution support
+    - Configuration and backup management
+    - Managed Tor process handling
+    - Startup connection verification
+    - Dedicated OnionGate configuration and log files
+
+    NOTE:
+    OnionGate does not support every network protocol through Tor.
+    UDP applications, private/local destinations, and applications
+    using independent encrypted DNS or VPN connections may not be
+    covered by its transparent proxy rules.
+
+
+BRIDGE TYPES
+------------
+
+    Direct (default):
+
+        Connects directly to the Tor network.
+
+        Use when a direct Tor connection is available.
+
+        sudo oniongate start
+
+
+    obfs4:
+
+        Uses obfs4 to make Tor traffic harder to identify through
+        basic traffic inspection.
+
+        Requires:
+            obfs4proxy
+
+        Start:
+
+            sudo oniongate start -o
+
+
+    Snowflake:
+
+        Uses the Snowflake transport to connect through volunteer
+        proxies.
+
+        Requires:
+            Snowflake transport software
+
+        Start:
+
+            sudo oniongate start -s
+
+
+    meek_lite:
+
+        Uses the meek_lite transport.
+
+        Requires:
+            A compatible transport plugin
+
+        Start:
+
+            sudo oniongate start -m
+
+
+    Bridge availability depends on the installed transport software,
+    Tor version, and bridge configuration.
+
+
+CONFIGURATION
+-------------
+
+    Main configuration:
+
+        /etc/oniongate/oniongate.conf
+
+    Tor configuration:
+
+        /etc/oniongate/torrc
+
+    Before using bridge options (-o, -s, -m), configure valid bridge
+    entries supported by the selected transport.
+
+    Bridge configuration must follow the format expected by Tor.
+
+    Do not include the "Bridge " prefix when the configuration
+    expects only the bridge details.
+
+    Example placeholder:
+
+        # OnionGate Bridge Configuration
+
+        # Add valid bridge entries here.
+        # Use the correct transport type and bridge details.
+
+    Get bridges:
+
+        https://bridges.torproject.org
+
+        https://t.me/GetBridgesBot
+
+        Email:
+            bridges@torproject.org
+
+        Example email request:
+
+            get transport obfs4
+
+
+HOW IT WORKS
+------------
+
+    Starting:
+
+        sudo oniongate start
+
+
+    OnionGate performs the following operations:
+
+    1. Checks root privileges and supported Linux distribution.
+
+    2. Detects required dependencies and available Tor packages.
+
+    3. Loads the OnionGate configuration.
+
+    4. Detects the appropriate Tor system user.
+
+    5. Prepares the Tor configuration and selected bridge mode.
+
+    6. Creates or updates OnionGate-specific firewall chains.
+
+    7. Configures supported DNS redirection through Tor DNSPort.
+
+    8. Configures supported TCP traffic redirection through
+       Tor TransPort.
+
+    9. Applies firewall restrictions to supported outbound traffic.
+
+   10. Starts the managed Tor process.
+
+   11. Checks Tor connectivity and reports the result.
+
+
+    Stopping:
+
+        sudo oniongate stop
+
+
+    OnionGate attempts to:
+
+    1. Stop its managed Tor process.
+
+    2. Remove its own firewall rules.
+
+    3. Restore applicable settings using available backups.
+
+    4. Restore normal network connectivity where possible.
+
+    NOTE:
+    OnionGate manages its own firewall chains and avoids deliberately
+    flushing unrelated system firewall rules.
+
+    DNS resolver files are not intentionally overwritten or locked.
+    IPv6 is restricted through firewall rules rather than being
+    globally disabled.
+
+
+SECURITY NOTES
+--------------
+
+    - Tor does not guarantee complete anonymity.
+    - OnionGate does not guarantee protection for every application.
+    - Verify the gateway status after starting OnionGate.
+    - Use HTTPS when accessing websites.
+    - Applications may use independent DNS or network connections.
+    - UDP and other unsupported protocols may not use Tor.
+    - Private and local network destinations may bypass Tor.
+    - Browser fingerprinting can still expose identifying information.
+    - Tor cannot prevent every form of traffic correlation.
+    - Keep Tor and your operating system updated.
+
+    MAC ADDRESS SPOOFING:
+
+        MAC spoofing is optional and is not enabled by default.
+
+        Use:
+
+            sudo oniongate start --spoof-mac
+
+        MAC address changes can affect network connectivity and
+        should be used only when appropriate.
+
+
+TROUBLESHOOTING
+---------------
+
+    Tor fails to connect:
+
+        - Check OnionGate status:
+
+            sudo oniongate status
+
+        - Try verbose mode:
+
+            sudo oniongate start -v
+
+        - Check the Tor log:
+
+            sudo tail -n 50 /etc/oniongate/tor.log
+
+        - Check whether the required transport plugin is installed.
+        - Verify your bridge configuration.
+
+
+    Bridge not found error:
+
+        - Open:
+
+            /etc/oniongate/oniongate.conf
+
+        - Check the bridge entries.
+        - Verify the selected transport is installed.
+        - Ensure the bridge format is valid for Tor.
+
+
+    No internet after stopping:
+
+        - Check OnionGate status:
+
+            sudo oniongate status
+
+        - Run the normal stop command again:
+
+            sudo oniongate stop
+
+        - Review the OnionGate logs.
+        - Check for conflicts with other firewall or VPN software.
+        - Inspect the system firewall before making further changes.
+
+        Do not blindly flush firewall rules because other applications
+        may depend on them.
+
+
+    Slow connection:
+
+        - Tor is naturally slower than a direct connection.
+        - Network performance depends on Tor relays and bridges.
+        - Try another supported bridge mode if necessary.
+        - Check your Tor logs for connection errors.
+
+
+FILES
+-----
+
+    /usr/local/bin/oniongate          Main executable
+
+    /etc/oniongate/                   Configuration directory
+
+    /etc/oniongate/oniongate.conf     OnionGate configuration
+
+    /etc/oniongate/torrc              Managed Tor configuration
+
+    /etc/oniongate/oniongate.status   Runtime status file
+
+    /etc/oniongate/tor.log            Tor log output
+
+    /etc/oniongate/backup/            Backup directory
+
+    /var/lib/oniongate/               Tor data directory
+
+
+FIREWALL CHAINS
+---------------
+
+    ONIONGATE_NAT
+        Handles OnionGate network address translation rules.
+
+    ONIONGATE_OUT
+        Handles OnionGate IPv4 outbound filtering.
+
+    ONIONGATE6_OUT
+        Handles OnionGate IPv6 outbound filtering.
+
+
+SUPPORTED DISTRIBUTIONS
+-----------------------
+
+    Debian-based:
+
+        - Debian
+        - Ubuntu
+        - Linux Mint
+        - Kali Linux
+        - Pop!_OS
+        - Zorin OS
+
+    Arch-based:
+
+        - Arch Linux
+        - Manjaro
+        - EndeavourOS
+        - Artix Linux
+
+
+LINKS
+-----
+
+    GitHub Profile:
+        https://github.com/usamoo2025
+
+    OnionGate Repository:
+        https://github.com/usamoo2025/oniongate
+
+    Tor Project:
+        https://www.torproject.org
+
+    Get Bridges:
+        https://bridges.torproject.org
+
+    Tor Connection Check:
+        https://check.torproject.org
+
+    Telegram Bridge Bot:
+        https://t.me/GetBridgesBot
+
+
+AUTHOR
+------
+
+    Project:       OnionGate
+    Author:        Usama Iqbal
+    GitHub:        usamoo2025
+
+    Repository:
+        https://github.com/usamoo2025/oniongate
+
+
+LICENSE
+-------
+
+    OnionGate is intended to be distributed under the
+    GNU General Public License v3.0 (GPL-3.0).
+
+    See the LICENSE file in the project repository for details.
+
+
+============================================================
+                         ONIONGATE
+              YOUR NETWORK, YOUR CONTROL.
+============================================================
+```

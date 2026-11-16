@@ -1,0 +1,1041 @@
+#!/usr/bin/env bash
+set -o pipefail
+
+# OnionGate - Anonymous Traffic Gateway
+# Route supported system TCP and DNS traffic through Tor using owned firewall chains
+# Debian- and Arch-based Linux systems
+
+VERSION="1.0.0"
+ONIONGATE_DIR="/etc/oniongate"
+BACKUP_DIR="$ONIONGATE_DIR/backup"
+CONFIG_FILE="$ONIONGATE_DIR/oniongate.conf"
+TORRC_FILE="$ONIONGATE_DIR/torrc"
+TORRC_BACKUP="$BACKUP_DIR/torrc.backup"
+RESOLV_BACKUP="$BACKUP_DIR/resolv.conf.backup"
+IPTABLES_BACKUP="$BACKUP_DIR/iptables.rules.backup"
+IP6TABLES_BACKUP="$BACKUP_DIR/ip6tables.rules.backup"
+MAC_BACKUP="$BACKUP_DIR/mac_addresses.backup"
+IPV6_ALL_BACKUP="$BACKUP_DIR/ipv6_all.backup"
+IPV6_DEFAULT_BACKUP="$BACKUP_DIR/ipv6_default.backup"
+DISTRO_FAMILY=""
+SPOOF_MAC=false
+STATUS_FILE="$ONIONGATE_DIR/oniongate.status"
+TOR_LOG="$ONIONGATE_DIR/tor.log"
+
+TOR_UID=""
+TOR_USER=""
+TOR_DNS_PORT="5353"
+TOR_TRANS_PORT="9040"
+TOR_SOCKS_PORT="9050"
+
+NON_TOR="127.0.0.0/8 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16"
+
+VERBOSE=false
+LOG_TAIL_PID=""
+ACTIVE_BRIDGE=""
+
+# ============================================
+# Banner Function
+# ============================================
+show_banner() {
+    cat << 'EOF'
+
+╔═══════════════════════════════════════════════╗
+║                    OnionGate                    ║
+║           Anonymous Traffic Gateway           ║
+╚═══════════════════════════════════════════════╝
+
+EOF
+}
+
+# ============================================
+# Colors
+# ============================================
+WHITE='\033[1;37m'
+GREEN='\033[0;32m'
+RED='\033[0;31m'
+ORANGE='\033[0;33m'
+NC='\033[0m'
+
+# ============================================
+# Utility Functions
+# ============================================
+log_info() {
+    printf '\r\033[K'
+    echo -e "${WHITE}[*] $1${NC}"
+}
+
+log_success() {
+    printf '\r\033[K'
+    echo -e "${GREEN}[+] $1${NC}"
+}
+
+log_error() {
+    printf '\r\033[K'
+    echo -e "${RED}[-] $1${NC}"
+}
+
+log_warning() {
+    printf '\r\033[K'
+    echo -e "${ORANGE}[!] $1${NC}"
+}
+
+check_root() {
+    if [[ $EUID -ne 0 ]]; then
+        log_error "This script must be run as root"
+        echo "    Usage: sudo oniongate <command>"
+        exit 1
+    fi
+}
+
+detect_distribution() {
+    if [[ ! -r /etc/os-release ]]; then
+        log_error "Cannot identify this Linux distribution (/etc/os-release missing)"
+        return 1
+    fi
+    . /etc/os-release
+    local ids=" ${ID:-} ${ID_LIKE:-} "
+    case "$ids" in
+        *debian*|*ubuntu*|*linuxmint*|*kali*|*pop*|*zorin*|*raspbian*) DISTRO_FAMILY="debian" ;;
+        *arch*|*manjaro*|*endeavouros*|*artix*) DISTRO_FAMILY="arch" ;;
+        *) log_error "Unsupported distribution: ${PRETTY_NAME:-unknown}. Supported families: Debian and Arch."; return 1 ;;
+    esac
+    return 0
+}
+
+detect_tor_user() {
+    if id debian-tor >/dev/null 2>&1; then
+        TOR_USER="debian-tor"
+    elif id tor >/dev/null 2>&1; then
+        TOR_USER="tor"
+    else
+        TOR_USER=""
+        TOR_UID=""
+        return 1
+    fi
+    TOR_UID=$(id -u "$TOR_USER")
+    return 0
+}
+
+is_running() {
+    if [[ -f "$STATUS_FILE" ]] && grep -q "running" "$STATUS_FILE" 2>/dev/null; then
+        return 0
+    fi
+    return 1
+}
+
+# ============================================
+# Dependency Management
+# ============================================
+check_dependencies() {
+    local missing=()
+    local required=(tor curl ip iptables iptables-save iptables-restore ip6tables sysctl runuser)
+    local cmd
+    for cmd in "${required[@]}"; do
+        command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd")
+    done
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        log_warning "Missing dependencies: ${missing[*]}"
+        return 1
+    fi
+    if [[ "$ACTIVE_BRIDGE" == "obfs4" || "$ACTIVE_BRIDGE" == "meek" ]]; then
+        command -v obfs4proxy >/dev/null 2>&1 || missing+=(obfs4proxy)
+    elif [[ "$ACTIVE_BRIDGE" == "snowflake" ]]; then
+        if ! command -v snowflake-client >/dev/null 2>&1 && ! command -v snowflake >/dev/null 2>&1; then missing+=(snowflake-client); fi
+    fi
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        log_warning "Missing dependencies: ${missing[*]}"
+        return 1
+    fi
+    detect_tor_user || { log_error "Tor service account (debian-tor or tor) was not found"; return 1; }
+    return 0
+}
+
+install_dependencies() {
+    log_info "Installing dependencies for ${DISTRO_FAMILY}..."
+    if [[ "$DISTRO_FAMILY" == "debian" ]]; then
+        apt-get update -qq
+        apt-get install -y tor curl iproute2 iptables ca-certificates util-linux
+        if [[ "$ACTIVE_BRIDGE" == "obfs4" || "$ACTIVE_BRIDGE" == "meek" ]]; then apt-get install -y obfs4proxy; fi
+        if [[ "$ACTIVE_BRIDGE" == "snowflake" ]]; then apt-get install -y snowflake-client || true; fi
+    elif [[ "$DISTRO_FAMILY" == "arch" ]]; then
+        pacman -Syu --needed --noconfirm tor curl iproute2 iptables ca-certificates util-linux
+        if [[ "$ACTIVE_BRIDGE" == "obfs4" || "$ACTIVE_BRIDGE" == "meek" ]]; then pacman -S --needed --noconfirm obfs4proxy; fi
+        if [[ "$ACTIVE_BRIDGE" == "snowflake" ]]; then pacman -S --needed --noconfirm snowflake || true; fi
+    else
+        log_error "Distribution has not been detected"
+        return 1
+    fi
+    log_success "Dependency installation completed"
+}
+
+# ============================================
+# Backup Functions
+# ============================================
+create_backup_dir() {
+    mkdir -p "$BACKUP_DIR" "$ONIONGATE_DIR/data"
+    chown "root:$TOR_USER" "$ONIONGATE_DIR" 2>/dev/null || true
+    chmod 750 "$ONIONGATE_DIR"
+    chown "$TOR_USER:$TOR_USER" "$ONIONGATE_DIR/data" 2>/dev/null || true
+    chmod 700 "$ONIONGATE_DIR/data"
+    chmod 700 "$BACKUP_DIR"
+}
+
+backup_iptables() {
+    log_info "Backing up current firewall rules..."
+    iptables-save > "$IPTABLES_BACKUP"
+    ip6tables-save > "$IP6TABLES_BACKUP"
+    log_success "Firewall rules backed up"
+}
+
+backup_resolv() {
+    # OnionGate no longer overwrites /etc/resolv.conf; DNS is redirected by its own NAT chain.
+    log_info "Leaving system DNS configuration unchanged"
+}
+
+backup_torrc() {
+    # OnionGate uses a private torrc and never overwrites the distribution's Tor configuration.
+    log_info "Using a dedicated OnionGate Tor configuration"
+}
+
+backup_mac_addresses() {
+    log_info "Recording network interface addresses..."
+    : > "$MAC_BACKUP"
+    if [[ "$SPOOF_MAC" == "true" ]]; then
+        for iface in $(ip -o link show | awk -F': ' '{print $2}' | cut -d@ -f1 | grep -v '^lo$'); do
+            mac=$(ip -o link show dev "$iface" | awk '{for(i=1;i<=NF;i++) if($i=="link/ether") print $(i+1)}')
+            [[ -n "$mac" ]] && printf '%s:%s\n' "$iface" "$mac" >> "$MAC_BACKUP"
+        done
+    fi
+    sysctl -n net.ipv6.conf.all.disable_ipv6 > "$IPV6_ALL_BACKUP"
+    sysctl -n net.ipv6.conf.default.disable_ipv6 > "$IPV6_DEFAULT_BACKUP"
+    log_success "Original interface and IPv6 settings recorded"
+}
+
+create_all_backups() {
+    create_backup_dir
+    backup_iptables
+    backup_resolv
+    backup_torrc
+    backup_mac_addresses
+}
+
+# ============================================
+# Restore Functions
+# ============================================
+restore_iptables() {
+    log_info "Removing only OnionGate firewall rules..."
+    remove_oniongate_firewall
+    log_success "OnionGate firewall rules removed; unrelated rules were left untouched"
+}
+
+restore_resolv() {
+    log_info "System DNS configuration was not modified"
+}
+
+restore_torrc() {
+    log_info "Distribution Tor configuration was not modified"
+}
+
+restore_mac_addresses() {
+    # Restore MAC addresses only if the user explicitly requested spoofing for this run.
+    if [[ -s "$MAC_BACKUP" ]]; then
+        log_info "Restoring recorded interface addresses..."
+        while IFS=: read -r iface mac; do
+            [[ -n "$iface" && -n "$mac" ]] || continue
+            ip link set dev "$iface" down 2>/dev/null || true
+            ip link set dev "$iface" address "$mac" 2>/dev/null || true
+            ip link set dev "$iface" up 2>/dev/null || true
+        done < "$MAC_BACKUP"
+    fi
+    log_success "Interface address restoration complete"
+}
+
+restore_all_backups() {
+    restore_iptables
+    restore_resolv
+    restore_torrc
+    restore_mac_addresses
+    if [[ -f "$IPV6_ALL_BACKUP" ]]; then sysctl -w "net.ipv6.conf.all.disable_ipv6=$(cat "$IPV6_ALL_BACKUP")" >/dev/null 2>&1 || true; fi
+    if [[ -f "$IPV6_DEFAULT_BACKUP" ]]; then sysctl -w "net.ipv6.conf.default.disable_ipv6=$(cat "$IPV6_DEFAULT_BACKUP")" >/dev/null 2>&1 || true; fi
+    rm -rf "$BACKUP_DIR"
+    log_success "Saved state cleaned up"
+}
+
+# ============================================
+# MAC Address Spoofing
+# ============================================
+generate_random_mac() {
+    printf '02:%02x:%02x:%02x:%02x:%02x\n' \
+        $((RANDOM % 256)) $((RANDOM % 256)) \
+        $((RANDOM % 256)) $((RANDOM % 256)) \
+        $((RANDOM % 256))
+}
+
+spoof_mac_addresses() {
+    log_info "Spoofing MAC addresses..."
+    for iface in $(ip -o link show | awk -F': ' '{print $2}' | grep -v lo); do
+        if ip link show "$iface" | grep -q "state UP"; then
+            new_mac=$(generate_random_mac)
+            ip link set "$iface" down 2>/dev/null
+            ip link set "$iface" address "$new_mac" 2>/dev/null
+            ip link set "$iface" up 2>/dev/null
+            log_info "  $iface -> $new_mac"
+        fi
+    done
+    log_success "MAC addresses spoofed"
+}
+
+# ============================================
+# IPv6 Management
+# ============================================
+disable_ipv6() {
+    log_info "Applying OnionGate IPv6 leak protection..."
+    # Do not globally disable IPv6 or flush the user's IPv6 firewall.
+    ip6tables -N ONIONGATE6_OUT 2>/dev/null || true
+    ip6tables -F ONIONGATE6_OUT
+    ip6tables -A ONIONGATE6_OUT -o lo -j RETURN
+    if [[ -n "$TOR_UID" ]]; then ip6tables -A ONIONGATE6_OUT -m owner --uid-owner "$TOR_UID" -j RETURN; fi
+    ip6tables -A ONIONGATE6_OUT -j REJECT
+    while ip6tables -C OUTPUT -j ONIONGATE6_OUT 2>/dev/null; do ip6tables -D OUTPUT -j ONIONGATE6_OUT; done
+    ip6tables -I OUTPUT 1 -j ONIONGATE6_OUT
+    log_success "IPv6 outbound traffic is blocked except loopback, established traffic, and Tor"
+}
+
+enable_ipv6() {
+    if ip6tables -nL ONIONGATE6_OUT >/dev/null 2>&1; then
+        while ip6tables -C OUTPUT -j ONIONGATE6_OUT 2>/dev/null; do ip6tables -D OUTPUT -j ONIONGATE6_OUT; done
+        ip6tables -F ONIONGATE6_OUT 2>/dev/null || true
+        ip6tables -X ONIONGATE6_OUT 2>/dev/null || true
+    fi
+    log_success "OnionGate IPv6 rules removed; original IPv6 sysctl values were not changed"
+}
+
+# ============================================
+# Log Display Management
+# ============================================
+stop_log_display() {
+    if [[ -n "$LOG_TAIL_PID" ]]; then
+        pkill -P "$LOG_TAIL_PID" 2>/dev/null
+        kill "$LOG_TAIL_PID" 2>/dev/null
+        wait "$LOG_TAIL_PID" 2>/dev/null
+        LOG_TAIL_PID=""
+    fi
+    [[ "$VERBOSE" != "true" ]] && printf '\r\033[K'
+}
+
+# ============================================
+# Signal Handling
+# ============================================
+cleanup_on_interrupt() {
+    echo ""
+    log_warning "Interrupted! Rolling back changes..."
+    stop_log_display
+    stop_tor
+    restore_all_backups
+    enable_ipv6
+    rm -f "$STATUS_FILE"
+    trap - INT TERM
+    exit 130
+}
+
+# ============================================
+# DNS Configuration
+# ============================================
+configure_dns() {
+    log_info "DNS requests will be redirected through Tor's DNSPort"
+    log_info "Leaving /etc/resolv.conf and resolver-managed files unchanged"
+}
+
+# ============================================
+# iptables Configuration
+# ============================================
+remove_oniongate_firewall() {
+    local chain
+    while iptables -t nat -C OUTPUT -j ONIONGATE_NAT 2>/dev/null; do iptables -t nat -D OUTPUT -j ONIONGATE_NAT; done
+    while iptables -C OUTPUT -j ONIONGATE_OUT 2>/dev/null; do iptables -D OUTPUT -j ONIONGATE_OUT; done
+    for chain in ONIONGATE_NAT; do iptables -t nat -F "$chain" 2>/dev/null || true; iptables -t nat -X "$chain" 2>/dev/null || true; done
+    iptables -F ONIONGATE_OUT 2>/dev/null || true
+    iptables -X ONIONGATE_OUT 2>/dev/null || true
+    if command -v ip6tables >/dev/null 2>&1; then
+        while ip6tables -C OUTPUT -j ONIONGATE6_OUT 2>/dev/null; do ip6tables -D OUTPUT -j ONIONGATE6_OUT; done
+        ip6tables -F ONIONGATE6_OUT 2>/dev/null || true
+        ip6tables -X ONIONGATE6_OUT 2>/dev/null || true
+    fi
+}
+
+configure_iptables() {
+    log_info "Configuring OnionGate-owned transparent proxy rules..."
+    remove_oniongate_firewall
+    iptables -t nat -N ONIONGATE_NAT
+    iptables -N ONIONGATE_OUT
+    # Keep local/private destinations outside the transparent proxy.
+    iptables -t nat -A ONIONGATE_NAT -d 127.0.0.0/8 -j RETURN
+    for net in 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 169.254.0.0/16; do iptables -t nat -A ONIONGATE_NAT -d "$net" -j RETURN; done
+    if [[ -n "$TOR_UID" ]]; then iptables -t nat -A ONIONGATE_NAT -m owner --uid-owner "$TOR_UID" -j RETURN; fi
+    iptables -t nat -A ONIONGATE_NAT -p udp --dport 53 -j REDIRECT --to-ports "$TOR_DNS_PORT"
+    iptables -t nat -A ONIONGATE_NAT -p tcp --dport 53 -j REDIRECT --to-ports "$TOR_DNS_PORT"
+    iptables -t nat -A ONIONGATE_NAT -p tcp --syn -j REDIRECT --to-ports "$TOR_TRANS_PORT"
+    iptables -t nat -I OUTPUT 1 -j ONIONGATE_NAT
+
+    iptables -A ONIONGATE_OUT -o lo -j RETURN
+    for net in 127.0.0.0/8 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 169.254.0.0/16; do iptables -A ONIONGATE_OUT -d "$net" -j RETURN; done
+    if [[ -n "$TOR_UID" ]]; then iptables -A ONIONGATE_OUT -m owner --uid-owner "$TOR_UID" -j RETURN; fi
+    iptables -A ONIONGATE_OUT -p tcp --dport "$TOR_TRANS_PORT" -j RETURN
+    iptables -A ONIONGATE_OUT -p udp --dport "$TOR_DNS_PORT" -j RETURN
+    iptables -A ONIONGATE_OUT -p tcp --dport "$TOR_DNS_PORT" -j RETURN
+    iptables -A ONIONGATE_OUT -j REJECT
+    iptables -I OUTPUT 1 -j ONIONGATE_OUT
+    log_success "OnionGate rules installed without flushing or replacing existing firewall policies"
+}
+
+# ============================================
+# Tor Configuration
+# ============================================
+get_bridge_from_config() {
+    local bridge_type="$1"
+    
+    if [[ ! -f "$CONFIG_FILE" ]]; then
+        log_error "Configuration file not found: $CONFIG_FILE"
+        return 1
+    fi
+    
+    local bridge_lines=""
+    
+    case "$bridge_type" in
+        obfs4)
+            bridge_lines=$(grep -iE "^[[:space:]]*obfs4[[:space:]]+" "$CONFIG_FILE")
+            ;;
+        snowflake)
+            bridge_lines=$(grep -iE "^[[:space:]]*snowflake[[:space:]]+" "$CONFIG_FILE")
+            ;;
+        meek|meek_lite)
+            bridge_lines=$(grep -iE "^[[:space:]]*meek_lite[[:space:]]+" "$CONFIG_FILE")
+            ;;
+    esac
+    
+    if [[ -z "$bridge_lines" ]]; then
+        log_error "No $bridge_type bridge found in $CONFIG_FILE"
+        return 1
+    fi
+    
+    echo "$bridge_lines"
+    return 0
+}
+
+configure_torrc_direct() {
+    log_info "Configuring Tor for direct connection..."
+    
+    cat > "$TORRC_FILE" << EOF
+# OnionGate Tor Configuration - Direct Connection
+# Generated by OnionGate
+
+VirtualAddrNetworkIPv4 10.192.0.0/10
+AutomapHostsOnResolve 1
+
+TransPort $TOR_TRANS_PORT
+DNSPort $TOR_DNS_PORT
+
+SocksPort $TOR_SOCKS_PORT
+
+DataDirectory $ONIONGATE_DIR/data
+RunAsDaemon 0
+Log notice stdout
+
+ClientOnly 1
+ExcludeSingleHopRelays 1
+EnforceDistinctSubnets 1
+EOF
+
+    log_success "Tor configured for direct connection"
+}
+
+configure_torrc_obfs4() {
+    log_info "Configuring Tor with obfs4 bridge(s)..."
+    
+    local bridge_lines
+    bridge_lines=$(get_bridge_from_config "obfs4")
+    if [[ $? -ne 0 ]]; then
+        return 1
+    fi
+    
+    local obfs4proxy_path
+    obfs4proxy_path=$(command -v obfs4proxy)
+    
+    cat > "$TORRC_FILE" << EOF
+# OnionGate Tor Configuration - obfs4 Bridge
+# Generated by OnionGate
+
+VirtualAddrNetworkIPv4 10.192.0.0/10
+AutomapHostsOnResolve 1
+
+TransPort $TOR_TRANS_PORT
+DNSPort $TOR_DNS_PORT
+
+SocksPort $TOR_SOCKS_PORT
+
+DataDirectory $ONIONGATE_DIR/data
+RunAsDaemon 0
+Log notice stdout
+
+ClientOnly 1
+ExcludeSingleHopRelays 1
+EnforceDistinctSubnets 1
+
+UseBridges 1
+ClientTransportPlugin obfs4 exec $obfs4proxy_path
+EOF
+
+    while IFS= read -r bridge_line; do
+        echo "Bridge $bridge_line" >> "$TORRC_FILE"
+    done <<< "$bridge_lines"
+
+    log_success "Tor configured with obfs4 bridge(s)"
+}
+
+configure_torrc_snowflake() {
+    log_info "Configuring Tor with snowflake bridge(s)..."
+    
+    local bridge_lines
+    bridge_lines=$(get_bridge_from_config "snowflake")
+    if [[ $? -ne 0 ]]; then
+        return 1
+    fi
+    
+    local snowflake_path
+    snowflake_path=$(command -v snowflake-client || command -v snowflake)
+    
+    cat > "$TORRC_FILE" << EOF
+# OnionGate Tor Configuration - Snowflake Bridge
+# Generated by OnionGate
+
+VirtualAddrNetworkIPv4 10.192.0.0/10
+AutomapHostsOnResolve 1
+
+TransPort $TOR_TRANS_PORT
+DNSPort $TOR_DNS_PORT
+
+SocksPort $TOR_SOCKS_PORT
+
+DataDirectory $ONIONGATE_DIR/data
+RunAsDaemon 0
+Log notice stdout
+
+ClientOnly 1
+ExcludeSingleHopRelays 1
+EnforceDistinctSubnets 1
+
+UseBridges 1
+ClientTransportPlugin snowflake exec $snowflake_path
+EOF
+
+    while IFS= read -r bridge_line; do
+        echo "Bridge $bridge_line" >> "$TORRC_FILE"
+    done <<< "$bridge_lines"
+
+    log_success "Tor configured with snowflake bridge(s)"
+}
+
+configure_torrc_meek() {
+    log_info "Configuring Tor with meek_lite bridge(s)..."
+    
+    local bridge_lines
+    bridge_lines=$(get_bridge_from_config "meek_lite")
+    if [[ $? -ne 0 ]]; then
+        return 1
+    fi
+    
+    local obfs4proxy_path
+    obfs4proxy_path=$(command -v obfs4proxy)
+    
+    cat > "$TORRC_FILE" << EOF
+# OnionGate Tor Configuration - meek_lite Bridge
+# Generated by OnionGate
+
+VirtualAddrNetworkIPv4 10.192.0.0/10
+AutomapHostsOnResolve 1
+
+TransPort $TOR_TRANS_PORT
+DNSPort $TOR_DNS_PORT
+
+SocksPort $TOR_SOCKS_PORT
+
+DataDirectory $ONIONGATE_DIR/data
+RunAsDaemon 0
+Log notice stdout
+
+ClientOnly 1
+ExcludeSingleHopRelays 1
+EnforceDistinctSubnets 1
+
+UseBridges 1
+ClientTransportPlugin meek_lite exec $obfs4proxy_path
+EOF
+
+    while IFS= read -r bridge_line; do
+        echo "Bridge $bridge_line" >> "$TORRC_FILE"
+    done <<< "$bridge_lines"
+
+    log_success "Tor configured with meek_lite bridge(s)"
+}
+
+# ============================================
+# Tor Service Management
+# ============================================
+start_tor() {
+    log_info "Starting OnionGate-managed Tor process..."
+    mkdir -p "$ONIONGATE_DIR/data"
+    chown -R "$TOR_USER:$TOR_USER" "$ONIONGATE_DIR/data"
+    chmod 700 "$ONIONGATE_DIR/data"
+    chown "$TOR_USER:$TOR_USER" "$TORRC_FILE"
+    chmod 600 "$TORRC_FILE"
+    tor --verify-config -f "$TORRC_FILE" >/dev/null || { log_error "Tor configuration validation failed"; return 1; }
+    : > "$TOR_LOG"
+    chown "$TOR_USER:$TOR_USER" "$TOR_LOG"
+    if [[ "$VERBOSE" == "true" ]]; then
+        runuser -u "$TOR_USER" -- tor -f "$TORRC_FILE" &
+    else
+        runuser -u "$TOR_USER" -- tor -f "$TORRC_FILE" >> "$TOR_LOG" 2>&1 &
+    fi
+    TOR_PID=$!
+    log_info "Waiting for Tor to bootstrap..."
+    if [[ "$VERBOSE" != "true" ]]; then
+        ( tail -n 0 -f "$TOR_LOG" 2>/dev/null | while IFS= read -r line; do printf '\r\033[K    %.*s' 120 "$line"; done ) &
+        LOG_TAIL_PID=$!
+    fi
+    local timeout=180 elapsed=0 check_result=""
+    while [[ $elapsed -lt $timeout ]]; do
+        if ! kill -0 "$TOR_PID" 2>/dev/null; then stop_log_display; log_error "OnionGate Tor process exited unexpectedly"; return 1; fi
+        check_result=$(curl -fsS --socks5-hostname "127.0.0.1:$TOR_SOCKS_PORT" --max-time 10 https://check.torproject.org/api/ip 2>/dev/null || true)
+        if grep -q '"IsTor":true' <<< "$check_result"; then
+            stop_log_display
+            printf '%s\n' "$TOR_PID" > "$ONIONGATE_DIR/tor.pid"
+            log_success "Tor successfully connected"
+            local tor_ip
+            tor_ip=$(sed -n 's/.*"IP":"\([^"]*\)".*/\1/p' <<< "$check_result")
+            [[ -n "$tor_ip" ]] && log_success "Tor exit IP: $tor_ip"
+            return 0
+        fi
+        sleep 5
+        elapsed=$((elapsed + 5))
+    done
+    stop_log_display
+    log_error "Tor failed to bootstrap within ${timeout}s"
+    stop_tor
+    return 1
+}
+
+stop_tor() {
+    log_info "Stopping only the Tor process started by OnionGate..."
+    if [[ -f "$ONIONGATE_DIR/tor.pid" ]]; then
+        local pid
+        pid=$(cat "$ONIONGATE_DIR/tor.pid")
+        if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
+            kill -TERM "$pid" 2>/dev/null || true
+            for _ in {1..10}; do kill -0 "$pid" 2>/dev/null || break; sleep 1; done
+            kill -KILL "$pid" 2>/dev/null || true
+        fi
+        rm -f "$ONIONGATE_DIR/tor.pid"
+    fi
+    rm -f "$TOR_LOG"
+    log_success "OnionGate Tor process stopped"
+}
+
+# ============================================
+# Bridge Validation
+# ============================================
+validate_bridge_config() {
+    local bridge_type="$1"
+    
+    if [[ -z "$bridge_type" ]]; then
+        return 0
+    fi
+    
+    if [[ ! -f "$CONFIG_FILE" ]]; then
+        log_error "Configuration file not found: $CONFIG_FILE"
+        return 1
+    fi
+    
+    local bridge_lines=""
+    local bridge_display_name=""
+    
+    case "$bridge_type" in
+        obfs4)
+            bridge_lines=$(grep -iE "^[[:space:]]*obfs4[[:space:]]+" "$CONFIG_FILE")
+            bridge_display_name="obfs4"
+            ;;
+        snowflake)
+            bridge_lines=$(grep -iE "^[[:space:]]*snowflake[[:space:]]+" "$CONFIG_FILE")
+            bridge_display_name="snowflake"
+            ;;
+        meek)
+            bridge_lines=$(grep -iE "^[[:space:]]*meek_lite[[:space:]]+" "$CONFIG_FILE")
+            bridge_display_name="meek_lite"
+            ;;
+        *)
+            log_error "Unknown bridge type: $bridge_type"
+            return 1
+            ;;
+    esac
+    
+    if [[ -z "$bridge_lines" ]]; then
+        log_error "No $bridge_display_name bridge found in $CONFIG_FILE"
+        log_info "Please add a $bridge_display_name bridge to $CONFIG_FILE"
+        log_info "Get bridges from: https://bridges.torproject.org"
+        echo ""
+        log_info "Example format for $bridge_display_name:"
+        case "$bridge_type" in
+            obfs4)
+                echo "    obfs4 IP:PORT FINGERPRINT cert=CERT iat-mode=0"
+                ;;
+            snowflake)
+                echo "    snowflake IP:PORT FINGERPRINT fingerprint=FP url=URL fronts=FRONTS ice=STUN utls-imitate=TYPE"
+                ;;
+            meek)
+                echo "    meek_lite IP:PORT url=URL front=FRONT utls=TYPE"
+                ;;
+        esac
+        return 1
+    fi
+    
+    local bridge_count=$(echo "$bridge_lines" | wc -l)
+    log_success "Found $bridge_count $bridge_display_name bridge(s) in configuration"
+    
+    return 0
+}
+
+# ============================================
+# Main Commands
+# ============================================
+cmd_start() {
+    local bridge_type="$1"
+    
+    show_banner
+    
+    check_root
+    detect_distribution || exit 1
+    ACTIVE_BRIDGE="$bridge_type"
+    
+    if is_running; then
+        log_warning "OnionGate is already running"
+        log_info "Run 'sudo oniongate stop' first"
+        exit 1
+    fi
+    
+    if ! check_dependencies; then
+        log_info "Attempting to install required dependencies..."
+        install_dependencies
+        if ! check_dependencies; then
+            log_error "Failed to install dependencies"
+            exit 1
+        fi
+    fi
+    
+    if [[ -z "$TOR_UID" ]]; then
+        log_error "Tor user not found. Please ensure Tor is properly installed."
+        exit 1
+    fi
+    
+    log_info "Starting OnionGate..."
+    echo ""
+
+    if [[ -n "$bridge_type" ]]; then
+        log_info "Validating bridge configuration..."
+        if ! validate_bridge_config "$bridge_type"; then
+            exit 1
+        fi
+        echo ""
+    fi
+    
+    create_all_backups
+    echo ""
+    
+    trap cleanup_on_interrupt INT TERM
+    
+    case "$bridge_type" in
+        "")
+            configure_torrc_direct
+            ;;
+        obfs4)
+            configure_torrc_obfs4 || exit 1
+            ;;
+        snowflake)
+            configure_torrc_snowflake || exit 1
+            ;;
+        meek)
+            configure_torrc_meek || exit 1
+            ;;
+        *)
+            log_error "Unknown bridge type: $bridge_type"
+            exit 1
+            ;;
+    esac
+    echo ""
+    
+    if [[ "$SPOOF_MAC" == "true" ]]; then
+        spoof_mac_addresses
+    else
+        log_info "MAC address changes are disabled by default (use --spoof-mac to opt in)"
+    fi
+    echo ""
+    
+    configure_iptables
+    echo ""
+    
+    disable_ipv6
+    echo ""
+    
+    configure_dns
+    echo ""
+    
+    if ! start_tor; then
+        trap - INT TERM
+        log_error "Failed to start Tor. Rolling back changes..."
+        restore_all_backups
+        enable_ipv6
+        exit 1
+    fi
+    echo ""
+    
+    trap - INT TERM
+    
+    echo "running" > "$STATUS_FILE"
+    
+    log_success "============================================"
+    log_success "OnionGate is now active"
+    log_success "Supported TCP and DNS traffic is routed through Tor"
+    log_success "============================================"
+    echo ""
+    log_info "To stop OnionGate, run: sudo oniongate stop"
+}
+
+cmd_stop() {
+    show_banner
+    
+    check_root
+    
+    if ! is_running; then
+        log_warning "OnionGate is not marked as running; checking for stale OnionGate rules"
+        remove_oniongate_firewall
+        if [[ -d "$BACKUP_DIR" ]]; then restore_all_backups; fi
+        rm -f "$STATUS_FILE"
+        exit 0
+    fi
+    
+    log_info "Stopping OnionGate..."
+    echo ""
+    
+    stop_tor
+    echo ""
+    
+    restore_all_backups
+    echo ""
+    
+    enable_ipv6
+    echo ""
+    
+    rm -f "$STATUS_FILE"
+    
+    log_success "============================================"
+    log_success "OnionGate stopped"
+    log_success "Original firewall and network settings restored"
+    log_success "============================================"
+}
+
+cmd_status() {
+    show_banner
+    
+    if is_running; then
+        log_success "OnionGate Status: ACTIVE"
+        echo ""
+        
+        local check_result
+        check_result=$(curl -s --socks5-hostname 127.0.0.1:$TOR_SOCKS_PORT --max-time 10 https://check.torproject.org/api/ip 2>/dev/null)
+        
+        if echo "$check_result" | grep -q '"IsTor":true'; then
+            local tor_ip
+            tor_ip=$(echo "$check_result" | grep -o '"IP":"[^"]*"' | cut -d'"' -f4)
+            log_success "Tor Connection: OK"
+            log_success "Tor Exit IP: $tor_ip"
+        else
+            log_error "Tor Connection: FAILED"
+            log_warning "Traffic may be leaking!"
+        fi
+    else
+        log_info "OnionGate Status: INACTIVE"
+    fi
+}
+
+cmd_version() {
+    show_banner
+    echo "    OnionGate V$VERSION"
+    echo ""
+}
+
+cmd_help() {
+    show_banner
+    
+    if [[ -f "/etc/oniongate/help.txt" ]]; then
+        cat "/etc/oniongate/help.txt"
+    else
+        cat << 'EOF'
+USAGE:
+    oniongate <command> [options]
+
+COMMANDS:
+    start           Start OnionGate (direct mode)
+    stop            Stop OnionGate and restore normal connection
+    status          Show OnionGate status
+    version         Show version information
+    help            Show instructions
+    uninstall       Remove OnionGate from system
+
+OPTIONS (used with start):
+    -o, --obfs4     Start OnionGate using obfs4 bridge
+    -s, --snowflake Start OnionGate using snowflake bridge
+    -m, --meek      Start OnionGate using meek_lite bridge
+    -v, --verbose   Show full Tor log output
+    --spoof-mac     Opt in to temporary MAC address changes (may disrupt connectivity)
+
+EXAMPLES:
+    oniongate start
+    oniongate start --obfs4
+    oniongate start -s
+    oniongate start -v
+    oniongate stop
+
+CONFIGURATION:
+    Edit /etc/oniongate/oniongate.conf to add your bridge lines.
+    
+    Example bridge formats:
+    
+    obfs4:
+    obfs4 IP:PORT FINGERPRINT cert=CERT iat-mode=0
+    
+    snowflake:
+    snowflake IP:PORT FINGERPRINT fingerprint=FP url=URL fronts=FRONTS ice=STUN utls-imitate=TYPE
+    
+    meek_lite:
+    meek_lite IP:PORT url=URL front=FRONT utls=TYPE
+
+DEPENDENCIES:
+    - tor: Debian: sudo apt install tor  |  Arch: sudo pacman -S tor
+    - obfs4proxy: Debian: sudo apt install obfs4proxy  |  Arch: sudo pacman -S obfs4proxy
+    - snowflake-client: Debian: sudo apt install snowflake-client  |  Arch: sudo pacman -S snowflake
+
+For more information, see: https://bridges.torproject.org
+EOF
+    fi
+    echo ""
+}
+
+cmd_uninstall() {
+    show_banner
+    
+    check_root
+    
+    log_info "Uninstalling OnionGate..."
+    
+    if is_running; then
+        log_info "Stopping OnionGate first..."
+        stop_tor
+        restore_all_backups
+        rm -f "$STATUS_FILE"
+    else
+        remove_oniongate_firewall
+    fi
+    
+    log_info "Removing OnionGate files..."
+    rm -f /usr/local/bin/oniongate
+    rm -rf "$ONIONGATE_DIR"
+    
+    log_success "OnionGate has been uninstalled"
+    log_info "Note: Tor, obfs4proxy, and snowflake-client were not removed"
+}
+
+# ============================================
+# Main Entry Point
+# ============================================
+main() {
+    local command_name="${1:-}"
+    case "$command_name" in
+        start)
+            shift
+            bridge_type=""
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    -o|--obfs4)
+                        bridge_type="obfs4"
+                        ;;
+                    -s|--snowflake)
+                        bridge_type="snowflake"
+                        ;;
+                    -m|--meek)
+                        bridge_type="meek"
+                        ;;
+                    -v|--verbose)
+                        VERBOSE=true
+                        ;;
+                    --spoof-mac)
+                        SPOOF_MAC=true
+                        ;;
+                    *)
+                        log_error "Unknown option: $1"
+                        exit 1
+                        ;;
+                esac
+                shift
+            done
+            cmd_start "$bridge_type"
+            ;;
+        stop)
+            cmd_stop
+            ;;
+        status)
+            cmd_status
+            ;;
+        version)
+            cmd_version
+            ;;
+        help|--help|-h)
+            cmd_help
+            ;;
+        uninstall)
+            cmd_uninstall
+            ;;
+        *)
+            show_banner
+            if [[ -n "$1" ]]; then
+                log_error "Unknown command: $1"
+            fi
+            echo "USAGE:"
+            echo "    oniongate <command> [options]"
+            echo ""
+            echo "COMMANDS:"
+            echo "    start           Start OnionGate (direct mode)"
+            echo "    stop            Stop OnionGate and restore normal connection"
+            echo "    status          Show OnionGate status"
+            echo "    version         Show version information"
+            echo "    help            Show instructions"
+            echo "    uninstall       Remove OnionGate from system"
+            echo ""
+            echo "OPTIONS (used with start):"
+            echo "    -o, --obfs4     Start OnionGate using obfs4 bridge"
+            echo "    -s, --snowflake Start OnionGate using snowflake bridge"
+            echo "    -m, --meek      Start OnionGate using meek_lite bridge"
+            echo "    -v, --verbose   Show full Tor log output"
+            echo "    --spoof-mac     Opt in to temporary MAC address changes (may disrupt connectivity)"
+            echo ""
+            echo "EXAMPLES:"
+            echo "    oniongate start"
+            echo "    oniongate start --obfs4"
+            echo "    oniongate start -s"
+            echo "    oniongate start -v"
+            echo "    oniongate stop"
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"
+
