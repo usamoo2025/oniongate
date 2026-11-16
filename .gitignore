@@ -1,0 +1,103 @@
+# ==========================================
+# OnionGate - Git Ignore
+# ==========================================
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Python packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+wheels/
+pip-wheel-metadata/
+
+# PySide6 / Qt
+*.ui.autosave
+*.qrc
+.qt_for_python/
+pyside6_project/
+
+# Application logs
+*.log
+logs/
+log/
+
+# Runtime files
+*.pid
+*.sock
+*.lock
+*.tmp
+*.bak
+*.swp
+*.swo
+*~
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+secrets/
+*.key
+*.pem
+*.crt
+*.p12
+*.pfx
+
+# Local OnionGate configuration
+oniongate.local.conf
+config.local.ini
+settings.local.json
+
+# Generated Tor data
+tor-data/
+tor-state/
+cached-certs
+cached-microdesc-consensus
+state
+
+# Test coverage
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
+.tox/
+.nox/
+coverage.xml
+
+# Type checking
+.mypy_cache/
+.pytype/
+.ruff_cache/
+
+# IDEs and editors
+.vscode/
+.idea/
+*.code-workspace
+
+# Operating system files
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Installer and build artifacts
+*.deb
+*.rpm
+*.pkg.tar.zst
+*.AppImage
+*.spec
+
+# Temporary files
+temp/
+tmp/
+.cache/
