@@ -8,6 +8,7 @@ QWidget { color: #E7EDF6; font-family: Arial; font-size: 12px; }
 #Logo { background-color: #57E0C0; color: #09201E; font-size: 25px; font-weight: 800;
  border-radius: 15px; min-width: 48px; max-width: 48px; min-height: 48px; max-height: 48px;
  qproperty-alignment: AlignCenter; }
+#LogoImage { background: transparent; border: none; }
 #Brand { color: #F1F5F9; font-size: 16px; font-weight: 800; letter-spacing: 2px; }
 #BrandSubtitle, #SidebarFooter { color: #8290A2; font-size: 10px; }
 #NavSection, #WorkspaceLabel { color: #8494A9; font-size: 10px; font-weight: 700; letter-spacing: 1.5px; }
@@ -32,9 +33,18 @@ QWidget { color: #E7EDF6; font-family: Arial; font-size: 12px; }
 #StatusIndicator[tone="bad"] { background-color: #F07878; }
 #StatusIndicator[tone="neutral"] { background-color: #718198; }
 #NavigationButton { background: transparent; color: #A5B2C3; text-align: left; padding: 10px 11px;
- border: 1px solid transparent; border-radius: 8px; font-weight: 600; }
+ border: 1px solid transparent; border-left: 3px solid transparent; border-radius: 8px; font-weight: 600; }
 #NavigationButton:hover { background-color: #152231; color: #F2F6FB; }
-#NavigationButton:checked { background-color: #15322F; color: #75E3CA; border-color: #204B43; }
+#NavigationButton:checked { background-color: #15322F; color: #75E3CA; border-color: #204B43;
+ border-left: 3px solid #32E6AE; }
+#MapPanel { background-color: #101A20; border: 1px solid #234338; border-radius: 15px; }
+#CountryQuickButton { background-color: rgba(15, 29, 34, 210); color: #DCE7F1;
+ border: 1px solid #355147; border-radius: 15px; padding: 7px 12px; font-weight: 700; }
+#CountryQuickButton:hover, #CountryQuickButton:checked { color: #68E5BD;
+ border: 1px solid #32E6AE; background-color: rgba(21, 54, 46, 220); }
+#HealthBar { min-height: 7px; max-height: 7px; border: none; border-radius: 4px;
+ background-color: #1A2938; }
+#HealthBar::chunk { background-color: #32E6AE; border-radius: 4px; }
 #SidebarFooterPanel { background-color: #111C29; border: 1px solid #223143; border-radius: 10px; }
 #SidebarMode { color: #60D9BA; font-size: 9px; font-weight: 700; letter-spacing: 1px; }
 #SupportBadge { background-color: #182839; color: #9BB0C3; border: 1px solid #2B4053;
@@ -83,6 +93,7 @@ QWidget { color: #253448; font-family: Arial; font-size: 12px; }
 #Logo { background-color: #27B596; color: #FFFFFF; font-size: 25px; font-weight: 800;
  border-radius: 15px; min-width: 48px; max-width: 48px; min-height: 48px; max-height: 48px;
  qproperty-alignment: AlignCenter; }
+#LogoImage { background: transparent; border: none; }
 #Brand { color: #1B2A3A; font-size: 16px; font-weight: 800; letter-spacing: 2px; }
 #BrandSubtitle, #SidebarFooter, #MutedText { color: #68798B; font-size: 10px; }
 #NavSection, #WorkspaceLabel { color: #748396; font-size: 10px; font-weight: 700; letter-spacing: 1.5px; }
@@ -100,9 +111,18 @@ QWidget { color: #253448; font-family: Arial; font-size: 12px; }
 #StatusIndicator[tone="warning"] { background-color: #C5851E; }
 #StatusIndicator[tone="bad"] { background-color: #D04F4F; }
 #NavigationButton { background: transparent; color: #55687A; text-align: left; padding: 10px 11px;
- border: 1px solid transparent; border-radius: 8px; font-weight: 600; }
+ border: 1px solid transparent; border-left: 3px solid transparent; border-radius: 8px; font-weight: 600; }
 #NavigationButton:hover { background-color: #F0F5F7; color: #243447; }
-#NavigationButton:checked { background-color: #E2F4EF; color: #14785F; border-color: #C5E8DE; }
+#NavigationButton:checked { background-color: #E2F4EF; color: #14785F; border-color: #C5E8DE;
+ border-left: 3px solid #25A987; }
+#MapPanel { background-color: #F4F8F6; border: 1px solid #CFE6DD; border-radius: 15px; }
+#CountryQuickButton { background-color: rgba(255, 255, 255, 220); color: #32465A;
+ border: 1px solid #C7DCD4; border-radius: 15px; padding: 7px 12px; font-weight: 700; }
+#CountryQuickButton:hover, #CountryQuickButton:checked { color: #14785F;
+ border: 1px solid #25A987; background-color: #E2F4EF; }
+#HealthBar { min-height: 7px; max-height: 7px; border: none; border-radius: 4px;
+ background-color: #E4EBF0; }
+#HealthBar::chunk { background-color: #25A987; border-radius: 4px; }
 #SidebarFooterPanel { background-color: #F7F9FB; border: 1px solid #DFE6ED; border-radius: 10px; }
 #SidebarMode { color: #16866E; font-size: 9px; font-weight: 700; letter-spacing: 1px; }
 #PrimaryButton, #ConnectButton { background-color: #25A987; color: #FFFFFF; border: none;

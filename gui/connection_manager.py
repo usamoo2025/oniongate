@@ -179,6 +179,14 @@ class ConnectionManager(QObject):
             self.operation_error.emit(
                 "The operation timed out. Check OnionGate status and logs before retrying."
             )
+        elif operation in ("verify_connect", "verify_disconnect"):
+            if exit_status == QProcess.ExitStatus.CrashExit:
+                self.operation_error.emit(
+                    self._output.strip()[-3000:]
+                    or f"Status verification process exited with status {exit_code}."
+                )
+            else:
+                self._complete_verification(operation)
         elif (
             exit_code != 0
             or exit_status == QProcess.ExitStatus.CrashExit
@@ -190,8 +198,6 @@ class ConnectionManager(QObject):
             self.operation_error.emit(detail[-3000:])
         elif operation in ("connect", "disconnect"):
             self._verify_runtime(operation)
-        elif operation in ("verify_connect", "verify_disconnect"):
-            self._complete_verification(operation)
 
     def _verify_runtime(self, operation: str) -> None:
         if self.backend_path is None:

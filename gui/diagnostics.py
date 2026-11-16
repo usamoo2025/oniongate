@@ -22,11 +22,9 @@ REQUIRED_UTILITIES = (
     "curl",
     "ip",
     "iptables",
-    "iptables-save",
-    "iptables-restore",
     "ip6tables",
-    "sysctl",
     "runuser",
+    "id",
 )
 
 OPTIONAL_TRANSPORTS = {

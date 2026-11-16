@@ -61,7 +61,7 @@ class ConnectionPage(QWidget):
         )
         self.exit_ip_value = self._card(cards, "VERIFIED EXIT IP", "Not verified")
         self.exit_country_value = self._card(cards, "OBSERVED EXIT COUNTRY", "Not provided by backend")
-        self.duration_value = self._card(cards, "SESSION DURATION", "Unknown")
+        self.duration_value = self._card(cards, "VERIFIED FOR", "Unknown")
         layout.addLayout(cards)
 
     def _card(self, layout: QGridLayout, heading_text: str, value_text: str) -> QLabel:

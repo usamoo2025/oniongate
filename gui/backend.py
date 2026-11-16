@@ -169,9 +169,15 @@ class BackendClient:
 
     def status(self, timeout: float = 12) -> tuple[CommandResult, RuntimeStatus]:
         result = self._invoke("status", timeout=timeout)
-        if not result.succeeded:
+        if result.error is not None or result.returncode is None:
             return result, RuntimeStatus(
                 "Unknown",
                 result.error or result.output or "Status command failed.",
             )
-        return result, parse_status_output(result.output)
+        runtime = parse_status_output(result.output)
+        if runtime.state == "Unknown" and not result.succeeded:
+            return result, RuntimeStatus(
+                "Unknown",
+                result.output or "Status command failed.",
+            )
+        return result, runtime

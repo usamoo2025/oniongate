@@ -158,7 +158,7 @@ class OnionGateWindow(QMainWindow):
         content_layout.addSpacing(9)
 
         self.pages = QStackedWidget()
-        self.dashboard_page = DashboardPage()
+        self.dashboard_page = DashboardPage(self.default_country)
         self.country_page = CountrySelector(self.default_country)
         self.connection_page = ConnectionPage()
         self.bridge_page = BridgeSelector(self.default_bridge)
@@ -178,6 +178,9 @@ class OnionGateWindow(QMainWindow):
         self.dashboard_page.refresh_button.clicked.connect(self.refresh_diagnostics)
         self.dashboard_page.connection_button.clicked.connect(
             self._handle_connection_button
+        )
+        self.dashboard_page.country_selected.connect(
+            self._dashboard_country_selected
         )
         self.dashboard_page.change_location_button.clicked.connect(
             lambda: self.sidebar.select_page(1)
@@ -295,6 +298,9 @@ class OnionGateWindow(QMainWindow):
             if snapshot.runtime_state == "Active · Tor verified":
                 self.connection_manager.is_connected = True
                 self.connection_manager.is_active = True
+                if self.session_started is None:
+                    self.session_started = datetime.now().astimezone()
+                    self.duration_timer.start(1000)
                 self._verified_exit_ip = parse_status_output(
                     snapshot.status_result.output
                 ).exit_ip
@@ -304,6 +310,7 @@ class OnionGateWindow(QMainWindow):
                 self.connection_page.exit_country_value.setText(
                     "Not provided by the OnionGate backend"
                 )
+                self._update_duration()
                 self._set_connection_state(
                     "Connected",
                     "The installed CLI verified that Tor is reachable.",
@@ -314,6 +321,9 @@ class OnionGateWindow(QMainWindow):
                 self.connection_manager.is_active = False
                 self.session_started = None
                 self.duration_timer.stop()
+                self.dashboard_page.duration_value.setText(
+                    "Verified for  00:00:00"
+                )
                 self._set_connection_state("Not Connected", snapshot.runtime_detail, "neutral")
             elif snapshot.runtime_state.startswith("Active"):
                 self.connection_manager.is_connected = False
@@ -361,12 +371,28 @@ class OnionGateWindow(QMainWindow):
         available_count = sum(
             check is not None and check.available is True for check in utility_checks
         )
+        readiness_checks = [
+            checks.get(name)
+            for name in (
+                *REQUIRED_UTILITIES,
+                "Linux distribution",
+                "Tor service account",
+                "OnionGate CLI",
+            )
+        ]
         self.dashboard_page.dependency_card.set_status(
             f"{available_count}/{len(REQUIRED_UTILITIES)} available",
             "Required backend utilities found in PATH.",
             "good"
             if available_count == len(REQUIRED_UTILITIES)
             else "warning",
+        )
+        self.dashboard_page.set_system_health(
+            sum(
+                check is not None and check.available is True
+                for check in readiness_checks
+            ),
+            len(readiness_checks),
         )
 
         lines = [
@@ -454,6 +480,10 @@ class OnionGateWindow(QMainWindow):
         self.diagnostics_page.log_output.setVisible(show_logs)
         self._sync_location_and_bridge_labels()
 
+    def _dashboard_country_selected(self, code: str) -> None:
+        country = country_for_code(code)
+        self._country_selected(country.name, code)
+
     def _country_selected(self, _name: str, code: str) -> None:
         self.default_country = code
         index = self.settings_page.country_combo.findData(code)
@@ -480,6 +510,7 @@ class OnionGateWindow(QMainWindow):
         self.dashboard_page.location_value.setText(
             f"{country.flag}  {country.name}"
         )
+        self.dashboard_page.set_country_selection(self.default_country)
         self.dashboard_page.bridge_value.setText(f"Bridge: {bridge_name}")
         self.connection_page.country_value.setText(country.name)
         self.connection_page.bridge_value.setText(bridge_name)
@@ -565,14 +596,16 @@ class OnionGateWindow(QMainWindow):
             and self.connection_manager.can_manage
         )
         if self.connection_manager.is_active and not self.connection_manager.is_connected:
-            self.dashboard_page.connection_button.setText("Stop active gateway")
+            self.dashboard_page.connection_button.set_state("active_unverified")
             self.connection_page.button.setText("Stop active gateway")
             self.dashboard_page.connection_button.setEnabled(
                 self.connection_manager.can_manage
             )
         elif state == "Connection error" and self.connection_manager.is_active:
             label = "Retry disconnect" if self.connection_manager.is_connected else "Stop active gateway"
-            self.dashboard_page.connection_button.setText(label)
+            self.dashboard_page.connection_button.set_state(
+                "connected" if self.connection_manager.is_connected else "active_unverified"
+            )
             self.connection_page.button.setText(label)
             self.connection_page.button.setEnabled(
                 self.connection_manager.can_manage
@@ -591,8 +624,8 @@ class OnionGateWindow(QMainWindow):
             answer = QMessageBox.question(
                 self,
                 "Disconnect OnionGate?",
-                "This runs the existing OnionGate stop command, which restores "
-                "firewall and network settings. Continue?",
+                "This stops OnionGate's Tor process and removes its tagged "
+                "firewall rules. Any MAC address changed by this run is restored. Continue?",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.No,
             )
@@ -613,7 +646,8 @@ class OnionGateWindow(QMainWindow):
             return
         warning = (
             "Starting OnionGate runs its existing privileged Tor gateway command "
-            "and changes firewall/DNS settings. This can affect connectivity. "
+            "and adds OnionGate-owned firewall rules, including DNS redirection. "
+            "This can affect connectivity. "
             "A selected country is only a Tor preference and is not guaranteed. "
             "Continue?"
         )
@@ -657,6 +691,9 @@ class OnionGateWindow(QMainWindow):
                 "Not provided by the OnionGate backend"
             )
             self.connection_page.duration_value.setText("00:00:00")
+            self.dashboard_page.duration_value.setText(
+                "Verified for  00:00:00"
+            )
             self.duration_timer.start(1000)
             self._set_connection_state(
                 "Connected",
@@ -671,6 +708,9 @@ class OnionGateWindow(QMainWindow):
             self.connection_manager.is_connected = False
             self.connection_page.exit_ip_value.setText("Not verified")
             self.connection_page.duration_value.setText("Unknown")
+            self.dashboard_page.duration_value.setText(
+                "Verified for  Unknown"
+            )
             self._set_connection_state(
                 "Not Connected",
                 "The OnionGate CLI reports the gateway inactive.",
@@ -710,9 +750,9 @@ class OnionGateWindow(QMainWindow):
         event.accept()
 
     def _update_duration(self) -> None:
-        self.connection_page.duration_value.setText(
-            connection_duration(self.session_started)
-        )
+        duration = connection_duration(self.session_started)
+        self.connection_page.duration_value.setText(duration)
+        self.dashboard_page.duration_value.setText(f"Verified for  {duration}")
 
 def main() -> int:
     app = QApplication(sys.argv)
