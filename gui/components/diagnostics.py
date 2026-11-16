@@ -17,6 +17,7 @@ class DiagnosticsPage(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(12)
         header = QHBoxLayout()
+        header.setSpacing(12)
         title = QLabel("System diagnostics")
         title.setObjectName("SectionTitle")
         header.addWidget(title)
@@ -26,11 +27,17 @@ class DiagnosticsPage(QWidget):
         header.addWidget(self.refresh_button)
         layout.addLayout(header)
 
+        description = QLabel(
+            "Read-only checks for your distribution, backend, and system tools."
+        )
+        description.setObjectName("MutedText")
+        layout.addWidget(description)
+
         self.output = QPlainTextEdit()
         self.output.setReadOnly(True)
         self.output.setObjectName("Console")
         layout.addWidget(self.output, 1)
-        log_title = QLabel("Recent OnionGate log")
+        log_title = QLabel("Recent backend log")
         log_title.setObjectName("SectionTitle")
         layout.addWidget(log_title)
         self.log_output = QPlainTextEdit()

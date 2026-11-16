@@ -13,25 +13,38 @@ class Sidebar(QFrame):
         self.setObjectName("Sidebar")
         self.setFixedWidth(220)
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 26, 20, 22)
-        layout.setSpacing(12)
+        layout.setContentsMargins(18, 22, 18, 18)
+        layout.setSpacing(8)
+
+        brand_row = QFrame()
+        brand_row.setObjectName("BrandRow")
+        brand_layout = QVBoxLayout(brand_row)
+        brand_layout.setContentsMargins(0, 0, 0, 0)
+        brand_layout.setSpacing(14)
 
         logo = QLabel("O")
         logo.setObjectName("Logo")
-        layout.addWidget(logo)
+        brand_layout.addWidget(logo, 0)
         brand = QLabel("ONIONGATE")
         brand.setObjectName("Brand")
-        layout.addWidget(brand)
+        brand_layout.addWidget(brand)
         subtitle = QLabel("LINUX PRIVACY GATEWAY")
         subtitle.setObjectName("BrandSubtitle")
-        layout.addWidget(subtitle)
-        layout.addSpacing(24)
+        brand_layout.addWidget(subtitle)
+        layout.addWidget(brand_row)
+        layout.addSpacing(28)
+
+        section = QLabel("WORKSPACE")
+        section.setObjectName("NavSection")
+        layout.addWidget(section)
+        layout.addSpacing(4)
 
         self.buttons: list[QPushButton] = []
         for index, name in enumerate(self.pages):
-            button = QPushButton(name)
+            button = QPushButton(f"{index + 1:02d}   {name}")
             button.setObjectName("NavigationButton")
             button.setCheckable(True)
+            button.setMinimumHeight(42)
             button.clicked.connect(
                 lambda checked=False, selected=index: self.select_page(selected)
             )
@@ -40,10 +53,19 @@ class Sidebar(QFrame):
         self.buttons[0].setChecked(True)
         layout.addStretch()
 
-        footer = QLabel("Independent open-source project")
+        footer_panel = QFrame()
+        footer_panel.setObjectName("SidebarFooterPanel")
+        footer_layout = QVBoxLayout(footer_panel)
+        footer_layout.setContentsMargins(12, 12, 12, 12)
+        footer_layout.setSpacing(6)
+        mode = QLabel("READ-ONLY MODE")
+        mode.setObjectName("SidebarMode")
+        footer = QLabel("Gateway controls stay in the OnionGate CLI.")
         footer.setObjectName("SidebarFooter")
         footer.setWordWrap(True)
-        layout.addWidget(footer)
+        footer_layout.addWidget(mode)
+        footer_layout.addWidget(footer)
+        layout.addWidget(footer_panel)
 
     def select_page(self, index: int) -> None:
         for position, button in enumerate(self.buttons):

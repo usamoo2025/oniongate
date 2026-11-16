@@ -1,8 +1,10 @@
 """Read-only OnionGate overview page."""
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QFrame,
     QGridLayout,
+    QHBoxLayout,
     QLabel,
     QPushButton,
     QVBoxLayout,
@@ -17,28 +19,38 @@ class DashboardPage(QWidget):
         super().__init__()
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(16)
+        layout.setSpacing(14)
 
         hero = QFrame()
         hero.setObjectName("Hero")
-        hero_layout = QVBoxLayout(hero)
-        hero_layout.setContentsMargins(22, 20, 22, 20)
+        hero_layout = QHBoxLayout(hero)
+        hero_layout.setContentsMargins(22, 18, 22, 18)
+        hero_layout.setSpacing(18)
+        hero_copy = QVBoxLayout()
+        hero_copy.setSpacing(7)
         eyebrow = QLabel("ONIONGATE OVERVIEW")
         eyebrow.setObjectName("Eyebrow")
-        title = QLabel("Your installation at a glance.")
+        title = QLabel("Gateway at a glance")
         title.setObjectName("HeroTitle")
         description = QLabel(
-            "Read-only status and system checks, using the existing OnionGate CLI."
+            "A clear view of your local installation and system readiness."
         )
         description.setObjectName("HeroDescription")
         description.setWordWrap(True)
-        hero_layout.addWidget(eyebrow)
-        hero_layout.addWidget(title)
-        hero_layout.addWidget(description)
+        hero_copy.addWidget(eyebrow)
+        hero_copy.addWidget(title)
+        hero_copy.addWidget(description)
+        hero_layout.addLayout(hero_copy, 1)
+
+        mode = QLabel("READ-ONLY MODE")
+        mode.setObjectName("ReadOnlyBadge")
+        mode.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        hero_layout.addWidget(mode, 0, Qt.AlignmentFlag.AlignVCenter)
         layout.addWidget(hero)
 
         cards = QGridLayout()
-        cards.setSpacing(12)
+        cards.setHorizontalSpacing(12)
+        cards.setVerticalSpacing(12)
         self.install_card = StatusCard("Installation", "Checking…", "OnionGate CLI")
         self.version_card = StatusCard("CLI version", "Checking…", "Reported by the backend")
         self.tor_card = StatusCard("Tor binary", "Checking…", "System executable")
@@ -61,8 +73,9 @@ class DashboardPage(QWidget):
         recent = QFrame()
         recent.setObjectName("Notice")
         recent_layout = QVBoxLayout(recent)
-        recent_layout.setContentsMargins(18, 14, 18, 14)
-        recent_heading = QLabel("RECENT DIAGNOSTIC")
+        recent_layout.setContentsMargins(16, 13, 16, 13)
+        recent_layout.setSpacing(6)
+        recent_heading = QLabel("LATEST CHECK")
         recent_heading.setObjectName("CardHeading")
         self.recent_detail = QLabel("No diagnostic has been collected yet.")
         self.recent_detail.setObjectName("MutedText")
@@ -72,5 +85,10 @@ class DashboardPage(QWidget):
         layout.addWidget(recent)
         self.refresh_button = QPushButton("Refresh checks")
         self.refresh_button.setObjectName("PrimaryButton")
-        layout.addWidget(self.refresh_button, 0)
+        self.refresh_button.setMinimumHeight(40)
+        layout.addWidget(
+            self.refresh_button,
+            0,
+            Qt.AlignmentFlag.AlignRight,
+        )
         layout.addStretch()

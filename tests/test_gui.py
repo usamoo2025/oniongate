@@ -18,13 +18,20 @@ class GuiSmokeTests(unittest.TestCase):
 
     def test_window_builds_all_navigation_pages(self):
         from gui.oniongate_gui import OnionGateWindow, RefreshWorker
+        from PySide6.QtWidgets import QLabel
 
         with patch.object(RefreshWorker, "start"):
             window = OnionGateWindow()
         self.assertEqual(window.pages.count(), 4)
         self.assertEqual(
-            [button.text() for button in window.sidebar.buttons],
+            [button.text().split()[-1] for button in window.sidebar.buttons],
             ["Overview", "Diagnostics", "Settings", "About"],
+        )
+        self.assertTrue(
+            any(
+                label.text() == "READ-ONLY MODE"
+                for label in window.dashboard_page.findChildren(QLabel)
+            )
         )
         window.close()
 
