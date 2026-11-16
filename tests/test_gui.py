@@ -1,6 +1,7 @@
 import importlib.util
 import os
 import sys
+import tempfile
 import unittest
 from importlib import import_module
 from pathlib import Path
@@ -22,15 +23,23 @@ class GuiSmokeTests(unittest.TestCase):
 
         with patch.object(RefreshWorker, "start"):
             window = OnionGateWindow()
-        self.assertEqual(window.pages.count(), 4)
+        self.assertEqual(window.pages.count(), 7)
         self.assertEqual(
             [button.text().split()[-1] for button in window.sidebar.buttons],
-            ["Overview", "Diagnostics", "Settings", "About"],
+            [
+                "Dashboard",
+                "Locations",
+                "Connection",
+                "Bridges",
+                "Diagnostics",
+                "Settings",
+                "About",
+            ],
         )
         self.assertTrue(
             any(
-                label.text() == "READ-ONLY MODE"
-                for label in window.dashboard_page.findChildren(QLabel)
+                label.text() == "TOR GATEWAY"
+                for label in window.findChildren(QLabel)
             )
         )
         window.close()
@@ -41,9 +50,43 @@ class GuiSmokeTests(unittest.TestCase):
         try:
             module = import_module("oniongate_gui")
             self.assertTrue(hasattr(module, "OnionGateWindow"))
+            entrypoint = import_module("app")
+            self.assertTrue(hasattr(entrypoint, "main"))
         finally:
             sys.path.remove(gui_directory)
             sys.modules.pop("oniongate_gui", None)
+            sys.modules.pop("app", None)
+
+    def test_connection_arguments_use_supported_cli_options(self):
+        from gui.connection_manager import build_start_arguments
+
+        self.assertEqual(
+            build_start_arguments(Path("/usr/local/bin/oniongate"), "obfs4", "de"),
+            (
+                str(Path("/usr/local/bin/oniongate")),
+                "start",
+                "--obfs4",
+                "--country",
+                "de",
+            ),
+        )
+        with self.assertRaises(ValueError):
+            build_start_arguments(Path("oniongate"), "unsupported", "")
+
+    def test_missing_pkexec_does_not_launch_privileged_command(self):
+        from gui.connection_manager import ConnectionManager
+
+        with tempfile.TemporaryDirectory() as directory:
+            backend = Path(directory) / "oniongate"
+            backend.write_text("", encoding="utf-8")
+            manager = ConnectionManager(backend, pkexec_path="")
+            errors = []
+            manager.operation_error.connect(errors.append)
+            with patch.object(manager, "_launch") as launch:
+                manager.connect_to_tor("", "")
+            launch.assert_not_called()
+            self.assertTrue(errors)
+            self.assertIn("pkexec", errors[0])
 
 
 if __name__ == "__main__":

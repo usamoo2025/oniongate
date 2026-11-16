@@ -1,21 +1,23 @@
 #!/usr/bin/env python3
-"""PySide6 read-only desktop companion for the OnionGate CLI."""
+"""PySide6 desktop interface for the existing OnionGate CLI."""
 
 from __future__ import annotations
 
 import sys
-from dataclasses import dataclass
 from datetime import datetime
-from pathlib import Path
 
-from PySide6.QtCore import QThread, Signal, Qt
-from PySide6.QtGui import QFont
+from PySide6.QtCore import QProcess, QSettings, Qt, QTimer
+from PySide6.QtGui import QCloseEvent, QFont
 from PySide6.QtWidgets import (
     QApplication,
     QFrame,
     QHBoxLayout,
     QLabel,
     QMainWindow,
+    QMessageBox,
+    QPushButton,
+    QStyle,
+    QSystemTrayIcon,
     QScrollArea,
     QStackedWidget,
     QVBoxLayout,
@@ -23,8 +25,11 @@ from PySide6.QtWidgets import (
 )
 
 if __package__:
-    from .backend import BackendClient, CommandResult, find_backend, parse_version_output
+    from .backend import parse_status_output, parse_version_output
     from .components.about import AboutPage
+    from .components.bridge_selector import BRIDGES, BridgeSelector
+    from .components.connection import ConnectionPage
+    from .components.country_selector import CountrySelector
     from .components.dashboard import DashboardPage
     from .components.diagnostics import DiagnosticsPage
     from .components.settings import SettingsPage
@@ -33,12 +38,20 @@ if __package__:
         CONFIG_FILE,
         REQUIRED_UTILITIES,
         Diagnostic,
+        check_bridge_configuration,
         collect_diagnostics,
         recent_log,
     )
+    from .connection_manager import ConnectionManager
+    from .country_manager import COUNTRIES, country_for_code
+    from .theme import stylesheet
+    from .workers import RefreshSnapshot, RefreshWorker, connection_duration
 else:
-    from backend import BackendClient, CommandResult, find_backend, parse_version_output
+    from backend import parse_status_output, parse_version_output
     from components.about import AboutPage
+    from components.bridge_selector import BRIDGES, BridgeSelector
+    from components.connection import ConnectionPage
+    from components.country_selector import CountrySelector
     from components.dashboard import DashboardPage
     from components.diagnostics import DiagnosticsPage
     from components.settings import SettingsPage
@@ -47,63 +60,59 @@ else:
         CONFIG_FILE,
         REQUIRED_UTILITIES,
         Diagnostic,
+        check_bridge_configuration,
         collect_diagnostics,
         recent_log,
     )
+    from connection_manager import ConnectionManager
+    from country_manager import COUNTRIES, country_for_code
+    from theme import stylesheet
+    from workers import RefreshSnapshot, RefreshWorker, connection_duration
 
 
 APP_NAME = "OnionGate"
 APP_VERSION = "1.0.0"
 
 
-@dataclass(frozen=True)
-class RefreshSnapshot:
-    backend_path: Path | None
-    version: CommandResult
-    help_result: CommandResult
-    status_result: CommandResult
-    runtime_state: str
-    runtime_detail: str
-    diagnostics: list[Diagnostic]
-    log_text: str
-    log_error: str | None
-
-
-class RefreshWorker(QThread):
-    completed = Signal(object)
-
-    def run(self) -> None:
-        backend_path = find_backend()
-        client = BackendClient(backend_path)
-        version = client.version()
-        help_result = client.help()
-        status_result, runtime = client.status()
-        diagnostics = collect_diagnostics(backend_path=backend_path)
-        log_text, log_error = recent_log()
-        self.completed.emit(
-            RefreshSnapshot(
-                backend_path,
-                version,
-                help_result,
-                status_result,
-                runtime.state,
-                runtime.detail,
-                diagnostics,
-                log_text,
-                log_error,
-            )
-        )
-
-
 class OnionGateWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.worker: RefreshWorker | None = None
+        self.preferences = QSettings("OnionGate", "OnionGate")
+        self.default_country = str(self.preferences.value("default_country", ""))
+        self.default_bridge = str(self.preferences.value("default_bridge", ""))
+        self.show_logs = self.preferences.value("show_logs", True, type=bool)
+        self.notifications_enabled = self.preferences.value(
+            "notifications", True, type=bool
+        )
+        self.tray_icon: QSystemTrayIcon | None = None
+        if QSystemTrayIcon.isSystemTrayAvailable():
+            self.tray_icon = QSystemTrayIcon(self)
+            self.tray_icon.setIcon(
+                self.style().standardIcon(QStyle.StandardPixmap.SP_ComputerIcon)
+            )
+            self.tray_icon.setToolTip("OnionGate")
+            self.tray_icon.show()
+        self.connection_manager = ConnectionManager()
+        self.connection_state = "Checking status…"
+        self.connection_detail = "Reading current status from the OnionGate CLI."
+        self.session_started: datetime | None = None
+        self._verified_exit_ip: str | None = None
+        self._bridge_available: dict[str, tuple[bool, str]] = {}
+        self.duration_timer = QTimer(self)
+        self.duration_timer.timeout.connect(self._update_duration)
         self.setWindowTitle("OnionGate")
         self.setMinimumSize(900, 640)
         self.resize(1240, 820)
         self._build_interface()
-        self._apply_styles()
+        self._apply_styles(str(self.preferences.value("theme", "dark")))
+        self.connection_manager.operation_started.connect(self._operation_started)
+        self.connection_manager.output_received.connect(self._connection_output)
+        self.connection_manager.bootstrap_progress.connect(
+            self.connection_page.set_bootstrap_progress
+        )
+        self.connection_manager.status_verified.connect(self._status_verified)
+        self.connection_manager.operation_error.connect(self._connection_error)
         self.refresh_diagnostics()
 
     def _build_interface(self) -> None:
@@ -122,13 +131,26 @@ class OnionGateWindow(QMainWindow):
         content_layout = QVBoxLayout(content)
         content_layout.setContentsMargins(32, 27, 32, 24)
         content_layout.setSpacing(7)
+        top_bar = QHBoxLayout()
         self.workspace_label = QLabel("ONIONGATE  /  DESKTOP CONSOLE")
         self.workspace_label.setObjectName("WorkspaceLabel")
-        content_layout.addWidget(self.workspace_label)
-        self.page_title = QLabel("Overview")
+        top_bar.addWidget(self.workspace_label)
+        top_bar.addStretch()
+        self.header_status = QLabel("Checking status…")
+        self.header_status.setObjectName("ConnectionStatus")
+        top_bar.addWidget(self.header_status)
+        self.version_label = QLabel("OnionGate")
+        self.version_label.setObjectName("MutedText")
+        top_bar.addWidget(self.version_label)
+        self.settings_shortcut = QPushButton("Settings")
+        self.settings_shortcut.setObjectName("SecondaryButton")
+        self.settings_shortcut.clicked.connect(lambda: self.sidebar.select_page(5))
+        top_bar.addWidget(self.settings_shortcut)
+        content_layout.addLayout(top_bar)
+        self.page_title = QLabel("Dashboard")
         self.page_title.setObjectName("PageTitle")
         self.page_description = QLabel(
-            "Read-only status and diagnostics for your local installation."
+            "Your OnionGate Tor gateway at a glance."
         )
         self.page_description.setObjectName("PageDescription")
         content_layout.addWidget(self.page_title)
@@ -137,18 +159,47 @@ class OnionGateWindow(QMainWindow):
 
         self.pages = QStackedWidget()
         self.dashboard_page = DashboardPage()
+        self.country_page = CountrySelector(self.default_country)
+        self.connection_page = ConnectionPage()
+        self.bridge_page = BridgeSelector(self.default_bridge)
         self.diagnostics_page = DiagnosticsPage()
         self.settings_page = SettingsPage(str(CONFIG_FILE))
         self.about_page = AboutPage()
         for page in (
             self.dashboard_page,
+            self.country_page,
+            self.connection_page,
+            self.bridge_page,
             self.diagnostics_page,
             self.settings_page,
             self.about_page,
         ):
             self.pages.addWidget(page)
         self.dashboard_page.refresh_button.clicked.connect(self.refresh_diagnostics)
+        self.dashboard_page.connection_button.clicked.connect(
+            self._handle_connection_button
+        )
+        self.dashboard_page.change_location_button.clicked.connect(
+            lambda: self.sidebar.select_page(1)
+        )
+        self.dashboard_page.change_bridge_button.clicked.connect(
+            lambda: self.sidebar.select_page(3)
+        )
+        self.dashboard_page.connection_settings_button.clicked.connect(
+            lambda: self.sidebar.select_page(2)
+        )
+        self.dashboard_page.diagnostics_button.clicked.connect(
+            lambda: self.sidebar.select_page(4)
+        )
+        self.connection_page.button.clicked.connect(self._handle_connection_button)
+        self.connection_page.diagnostics_button.clicked.connect(
+            lambda: self.sidebar.select_page(4)
+        )
+        self.country_page.country_selected.connect(self._country_selected)
+        self.bridge_page.bridge_selected.connect(self._bridge_selected)
+        self.settings_page.preferences_changed.connect(self._preferences_changed)
         self.diagnostics_page.refresh_button.clicked.connect(self.refresh_diagnostics)
+        self._apply_preferences_to_pages()
         scroll_area = QScrollArea()
         scroll_area.setObjectName("PageScrollArea")
         scroll_area.setWidgetResizable(True)
@@ -162,11 +213,22 @@ class OnionGateWindow(QMainWindow):
         self.setCentralWidget(root)
 
     def change_page(self, index: int) -> None:
-        titles = ("Overview", "Diagnostics", "Settings", "About")
+        titles = (
+            "Dashboard",
+            "Locations",
+            "Connection",
+            "Bridges",
+            "Diagnostics",
+            "Settings",
+            "About",
+        )
         descriptions = (
-            "Read-only status and diagnostics for this OnionGate installation.",
+            "Manage and verify your OnionGate Tor gateway.",
+            "Choose a Tor exit-country preference; availability is not queried.",
+            "Control the installed OnionGate backend and inspect verified status.",
+            "Choose a configured Tor bridge transport.",
             "Read-only distribution, executable, configuration, and dependency checks.",
-            "Capabilities exposed by the existing OnionGate backend.",
+            "User-scoped desktop preferences; gateway configuration remains CLI-managed.",
             "Project information and limitations.",
         )
         self.pages.setCurrentIndex(index)
@@ -175,7 +237,7 @@ class OnionGateWindow(QMainWindow):
         self.workspace_label.setText(
             f"ONIONGATE  /  {titles[index].upper()}"
         )
-        if index == 1:
+        if index == 4:
             self.refresh_diagnostics()
 
     def refresh_diagnostics(self) -> None:
@@ -193,6 +255,7 @@ class OnionGateWindow(QMainWindow):
         self.diagnostics_page.refresh_button.setEnabled(True)
 
     def _apply_snapshot(self, snapshot: RefreshSnapshot) -> None:
+        self.connection_manager.backend_path = snapshot.backend_path
         backend_value = "Found" if snapshot.backend_path else "Missing"
         backend_detail = str(snapshot.backend_path or "OnionGate CLI not found")
         self.dashboard_page.install_card.set_status(
@@ -213,6 +276,7 @@ class OnionGateWindow(QMainWindow):
             or "No valid version was returned by the CLI.",
             "good" if version else "warning",
         )
+        self.version_label.setText(f"OnionGate {version or 'version unknown'}")
         runtime_tone = (
             "good"
             if "verified" in snapshot.runtime_state.lower()
@@ -227,6 +291,58 @@ class OnionGateWindow(QMainWindow):
             snapshot.runtime_detail,
             runtime_tone,
         )
+        if self.connection_manager.operation is None:
+            if snapshot.runtime_state == "Active · Tor verified":
+                self.connection_manager.is_connected = True
+                self.connection_manager.is_active = True
+                self._verified_exit_ip = parse_status_output(
+                    snapshot.status_result.output
+                ).exit_ip
+                self.connection_page.exit_ip_value.setText(
+                    self._verified_exit_ip or "Verified; IP not reported"
+                )
+                self.connection_page.exit_country_value.setText(
+                    "Not provided by the OnionGate backend"
+                )
+                self._set_connection_state(
+                    "Connected",
+                    "The installed CLI verified that Tor is reachable.",
+                    "good",
+                )
+            elif snapshot.runtime_state == "Inactive":
+                self.connection_manager.is_connected = False
+                self.connection_manager.is_active = False
+                self.session_started = None
+                self.duration_timer.stop()
+                self._set_connection_state("Not Connected", snapshot.runtime_detail, "neutral")
+            elif snapshot.runtime_state.startswith("Active"):
+                self.connection_manager.is_connected = False
+                self.connection_manager.is_active = True
+                self._set_connection_state(
+                    "Connection status unknown",
+                    snapshot.runtime_detail
+                    + " The GUI will not report Connected without a successful Tor check.",
+                    "warning",
+                )
+            else:
+                self.connection_manager.is_active = False
+                self._set_connection_state(
+                    "Connection status unknown",
+                    snapshot.runtime_detail,
+                    "warning",
+                )
+        self._update_bridge_availability(snapshot)
+        self._sync_location_and_bridge_labels()
+        if not self.connection_manager.can_manage:
+            unavailable = (
+                "GUI controls require the OnionGate CLI and pkexec. "
+                "Use the CLI manually; no privilege command is launched automatically."
+            )
+            if self.connection_state == "Not Connected":
+                self.connection_detail = unavailable
+                self.connection_page.detail.setText(unavailable)
+                self.connection_page.button.setEnabled(False)
+                self.dashboard_page.connection_button.setEnabled(False)
 
         checks = {item.name: item for item in snapshot.diagnostics}
         tor_check = checks.get("tor")
@@ -286,8 +402,13 @@ class OnionGateWindow(QMainWindow):
         self.diagnostics_page.output.setPlainText("\n".join(lines))
         self.diagnostics_page.log_output.setPlainText(
             snapshot.log_text
-            or (f"Log unavailable: {snapshot.log_error}" if snapshot.log_error else "Log file is empty.")
+            or (
+                f"Log unavailable: {snapshot.log_error}"
+                if snapshot.log_error
+                else "Log file is empty."
+            )
         )
+        self.diagnostics_page.log_output.setVisible(self.show_logs)
 
         timestamp = datetime.now().astimezone().strftime("%H:%M:%S")
         issues = [
@@ -304,116 +425,299 @@ class OnionGateWindow(QMainWindow):
             f"Runtime: {snapshot.runtime_detail}"
         )
 
-    def _apply_styles(self) -> None:
-        self.setStyleSheet(
-            """
-            QWidget {
-                color: #E7EDF6;
-                font-family: Arial;
-                font-size: 12px;
-            }
-            #Root, #MainContent, #PageScrollArea, QStackedWidget {
-                background-color: #0B111B;
-            }
-            #Sidebar {
-                background-color: #0D1521;
-                border-right: 1px solid #1D2A39;
-            }
-            #Logo {
-                background-color: #57E0C0; color: #09201E; font-size: 25px;
-                font-weight: 800; border-radius: 15px; min-width: 48px;
-                max-width: 48px; min-height: 48px; max-height: 48px;
-                qproperty-alignment: AlignCenter;
-            }
-            #Brand { color: #F1F5F9; font-size: 16px; font-weight: 800; letter-spacing: 2px; }
-            #BrandSubtitle, #SidebarFooter { color: #8290A2; font-size: 10px; }
-            #NavSection, #WorkspaceLabel {
-                color: #8494A9; font-size: 10px; font-weight: 700;
-                letter-spacing: 1.5px;
-            }
-            #PageTitle { color: #F1F5F9; font-size: 27px; font-weight: 700; }
-            #PageDescription { color: #9BAABD; font-size: 12px; }
-            #Hero {
-                background-color: #111F2D;
-                border: 1px solid #21374A;
-                border-radius: 15px;
-            }
-            #Eyebrow { color: #57D9BC; font-size: 10px; font-weight: 700; letter-spacing: 1.6px; }
-            #HeroTitle { color: #F3F7FB; font-size: 21px; font-weight: 700; }
-            #HeroDescription, #NoticeText { color: #A8B6C7; }
-            #ReadOnlyBadge {
-                background-color: #12362F; color: #73E3C8;
-                border: 1px solid #1E5449; border-radius: 9px;
-                padding: 9px 11px; font-size: 9px; font-weight: 700;
-                letter-spacing: 1px;
-            }
-            #InfoCard, #Notice {
-                background-color: #101A27;
-                border: 1px solid #202E3E;
-                border-radius: 12px;
-            }
-            #InfoCard:hover { border-color: #31485A; }
-            #CardHeading { color: #8E9DB0; font-size: 9px; font-weight: 700; letter-spacing: 1.3px; }
-            #CardValue { color: #EAF0F7; font-size: 16px; font-weight: 700; }
-            #MutedText { color: #95A4B7; }
-            #SectionTitle { color: #EAF0F7; font-size: 17px; font-weight: 700; }
-            #StatusIndicator {
-                min-width: 8px; max-width: 8px;
-                min-height: 8px; max-height: 8px;
-                border-radius: 4px; background-color: #718198;
-            }
-            #StatusIndicator[tone="good"] { background-color: #55D6B2; }
-            #StatusIndicator[tone="warning"] { background-color: #E9B96E; }
-            #StatusIndicator[tone="bad"] { background-color: #F07878; }
-            #StatusIndicator[tone="neutral"] { background-color: #718198; }
-            #NavigationButton {
-                background: transparent; color: #A5B2C3; text-align: left;
-                padding: 10px 11px; border: 1px solid transparent;
-                border-radius: 8px; font-weight: 600;
-            }
-            #NavigationButton:hover { background-color: #152231; color: #F2F6FB; }
-            #NavigationButton:checked {
-                background-color: #15322F; color: #75E3CA;
-                border-color: #204B43;
-            }
-            #SidebarFooterPanel { background-color: #111C29; border: 1px solid #223143; border-radius: 10px; }
-            #SidebarMode { color: #60D9BA; font-size: 9px; font-weight: 700; letter-spacing: 1px; }
-            #SupportBadge {
-                background-color: #182839; color: #9BB0C3;
-                border: 1px solid #2B4053; border-radius: 7px;
-                padding: 6px 8px; font-size: 9px; font-weight: 700;
-            }
-            #PrimaryButton {
-                background-color: #2CB99A; color: #061D1A; border: none;
-                border-radius: 8px; padding: 9px 16px; font-weight: 700;
-            }
-            #PrimaryButton:hover { background-color: #49D2B0; }
-            #PrimaryButton:disabled { background-color: #263D3A; color: #91A9A3; }
-            #PageScrollArea { background: transparent; border: none; }
-            #Console {
-                background-color: #0D1723; border: 1px solid #223246;
-                border-radius: 10px; padding: 12px; color: #C3D0DE;
-                selection-background-color: #245A54;
-                font-family: monospace;
-                font-size: 11px;
-            }
-            QScrollBar:vertical {
-                background: transparent; width: 9px; margin: 3px;
-            }
-            QScrollBar::handle:vertical {
-                background: #304357; min-height: 30px; border-radius: 4px;
-            }
-            QScrollBar::handle:vertical:hover { background: #47627A; }
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
-                height: 0; border: none;
-            }
-            """
-        )
+    def _apply_styles(self, name: str) -> None:
+        self.setStyleSheet(stylesheet(name))
 
+    def _apply_preferences_to_pages(self) -> None:
+        country = next(
+            (item for item in COUNTRIES if item.code == self.default_country),
+            COUNTRIES[0],
+        )
+        self.country_page.selected_code = country.code
+        self.country_page._populate()
+        self.bridge_page.select(self.default_bridge)
+
+    def _preferences_changed(
+        self,
+        theme: str,
+        country: str,
+        bridge: str,
+        show_logs: bool,
+        notifications: bool,
+    ) -> None:
+        self.default_country = country
+        self.default_bridge = bridge
+        self.show_logs = show_logs
+        self.notifications_enabled = notifications
+        self._apply_styles(theme)
+        self._apply_preferences_to_pages()
+        self.diagnostics_page.log_output.setVisible(show_logs)
+        self._sync_location_and_bridge_labels()
+
+    def _country_selected(self, _name: str, code: str) -> None:
+        self.default_country = code
+        index = self.settings_page.country_combo.findData(code)
+        if index >= 0:
+            self.settings_page.country_combo.setCurrentIndex(index)
+        self._sync_location_and_bridge_labels()
+
+    def _bridge_selected(self, bridge: str) -> None:
+        self.default_bridge = bridge
+        index = self.settings_page.bridge_combo.findData(bridge)
+        if index >= 0:
+            self.settings_page.bridge_combo.setCurrentIndex(index)
+        self._sync_location_and_bridge_labels()
+
+    def _sync_location_and_bridge_labels(self) -> None:
+        country = next(
+            (item for item in COUNTRIES if item.code == self.default_country),
+            COUNTRIES[0],
+        )
+        bridge_name = next(
+            (name for name, argument, _description in BRIDGES if argument == self.default_bridge),
+            "Direct",
+        )
+        self.dashboard_page.location_value.setText(
+            f"{country.flag}  {country.name}"
+        )
+        self.dashboard_page.bridge_value.setText(f"Bridge: {bridge_name}")
+        self.connection_page.country_value.setText(country.name)
+        self.connection_page.bridge_value.setText(bridge_name)
+
+    def _update_bridge_availability(self, snapshot: RefreshSnapshot) -> None:
+        checks = {item.name: item for item in snapshot.diagnostics}
+        tor = checks.get("tor")
+        config = checks.get("Configuration file")
+        distribution = checks.get("Linux distribution")
+        direct_ready = bool(tor and tor.available)
+        required_tools_ready = all(
+            checks.get(name) is not None and checks[name].available
+            for name in REQUIRED_UTILITIES
+        )
+        service_account = checks.get("Tor service account")
+        required_tools_ready = required_tools_ready and bool(
+            service_account and service_account.available
+        )
+        required_tools_ready = required_tools_ready and bool(
+            distribution and distribution.available
+        )
+        direct_ready = direct_ready and required_tools_ready
+        self.bridge_page.set_availability(
+            "",
+            direct_ready,
+            "Tor and required CLI utilities are available."
+            if direct_ready
+            else "Distribution, Tor, required utilities, or Tor service account is unavailable.",
+        )
+        self._bridge_available[""] = (
+            direct_ready,
+            "Tor and required CLI utilities are available."
+            if direct_ready
+            else                         "Distribution, Tor, required utilities, or Tor service account is unavailable.",
+        )
+        for bridge, display_name, transport in (
+            ("obfs4", "obfs4", "obfs4proxy"),
+            ("snowflake", "Snowflake", "snowflake"),
+            ("meek", "meek_lite", "obfs4proxy"),
+        ):
+            transport_check = checks.get(transport)
+            if transport_check is None and transport == "snowflake":
+                transport_check = checks.get("Optional transport: snowflake")
+            elif transport_check is None and transport == "obfs4proxy":
+                transport_check = checks.get("Optional transport: obfs4proxy")
+            bridge_config = check_bridge_configuration(bridge)
+            available = bool(
+                direct_ready
+                and config
+                and config.available
+                and transport_check
+                and transport_check.available
+                and bridge_config.available
+            )
+            if not tor or not tor.available:
+                detail = "Unavailable: Tor binary is missing."
+            elif not required_tools_ready:
+                detail = "Unavailable: required CLI utilities or Tor service account are missing."
+            elif not transport_check or not transport_check.available:
+                detail = "Unavailable: transport executable is missing."
+            elif not bridge_config.available:
+                detail = bridge_config.detail
+            else:
+                detail = "Transport binary and configured bridge lines found."
+            self.bridge_page.set_availability(bridge, available, detail)
+            self._bridge_available[bridge] = (available, detail)
+
+    def _set_connection_state(self, state: str, detail: str, tone: str) -> None:
+        self.connection_state = state
+        self.connection_detail = detail
+        self.dashboard_page.set_connection_state(state, detail, tone)
+        self.connection_page.set_state(state, detail, tone)
+        self.header_status.setText(state)
+        self.header_status.setProperty("tone", tone)
+        self.header_status.style().unpolish(self.header_status)
+        self.header_status.style().polish(self.header_status)
+        self.dashboard_page.connection_button.setEnabled(
+            state in ("Not Connected", "Connected", "Connection error")
+            and self.connection_manager.can_manage
+        )
+        self.connection_page.button.setEnabled(
+            state in ("Not Connected", "Connected", "Connection error")
+            and self.connection_manager.can_manage
+        )
+        if self.connection_manager.is_active and not self.connection_manager.is_connected:
+            self.dashboard_page.connection_button.setText("Stop active gateway")
+            self.connection_page.button.setText("Stop active gateway")
+            self.dashboard_page.connection_button.setEnabled(
+                self.connection_manager.can_manage
+            )
+        elif state == "Connection error" and self.connection_manager.is_active:
+            label = "Retry disconnect" if self.connection_manager.is_connected else "Stop active gateway"
+            self.dashboard_page.connection_button.setText(label)
+            self.connection_page.button.setText(label)
+            self.connection_page.button.setEnabled(
+                self.connection_manager.can_manage
+            )
+
+    def _handle_connection_button(self) -> None:
+        if not self.connection_manager.can_manage:
+            self._set_connection_state(
+                "Connection error",
+                "GUI controls require the OnionGate CLI and pkexec. "
+                "Manual commands: sudo oniongate start / sudo oniongate stop.",
+                "bad",
+            )
+            return
+        if self.connection_manager.is_connected or self.connection_manager.is_active:
+            answer = QMessageBox.question(
+                self,
+                "Disconnect OnionGate?",
+                "This runs the existing OnionGate stop command, which restores "
+                "firewall and network settings. Continue?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer == QMessageBox.StandardButton.Yes:
+                self.connection_manager.disconnect()
+            return
+        available, reason = self._bridge_available.get(
+            self.default_bridge,
+            (False, "Bridge availability has not been checked."),
+        )
+        if not available:
+            self._connection_error(reason)
+            return
+        try:
+            country = country_for_code(self.default_country)
+        except ValueError as exc:
+            self._connection_error(str(exc))
+            return
+        warning = (
+            "Starting OnionGate runs its existing privileged Tor gateway command "
+            "and changes firewall/DNS settings. This can affect connectivity. "
+            "A selected country is only a Tor preference and is not guaranteed. "
+            "Continue?"
+        )
+        answer = QMessageBox.warning(
+            self,
+            "Start OnionGate?",
+            warning,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer == QMessageBox.StandardButton.Yes:
+            self.connection_manager.connect_to_tor(
+                self.default_bridge,
+                country.code,
+            )
+
+    def _operation_started(self, operation: str) -> None:
+        label = "Connecting to Tor" if operation == "connect" else "Disconnecting"
+        self._set_connection_state(
+            label,
+            "Running the installed OnionGate CLI. Bootstrap progress is shown only "
+            "when the backend emits a verified percentage.",
+            "warning",
+        )
+        if operation == "connect":
+            self.connection_page.progress.setRange(0, 0)
+            self.connection_page.progress.show()
+
+    def _connection_output(self, text: str) -> None:
+        if "Bootstrapped" not in text:
+            self.connection_page.detail.setText(text.strip()[-1000:])
+
+    def _status_verified(self, runtime: object) -> None:
+        if getattr(runtime, "state", "") == "Active · Tor verified":
+            self.session_started = datetime.now().astimezone()
+            self._verified_exit_ip = getattr(runtime, "exit_ip", None)
+            self.connection_page.exit_ip_value.setText(
+                self._verified_exit_ip or "Verified; IP not reported"
+            )
+            self.connection_page.exit_country_value.setText(
+                "Not provided by the OnionGate backend"
+            )
+            self.connection_page.duration_value.setText("00:00:00")
+            self.duration_timer.start(1000)
+            self._set_connection_state(
+                "Connected",
+                "The OnionGate CLI reports ACTIVE and Tor Connection: OK.",
+                "good",
+            )
+            self.connection_page.progress.hide()
+        else:
+            self.duration_timer.stop()
+            self.session_started = None
+            self.connection_manager.is_active = False
+            self.connection_manager.is_connected = False
+            self.connection_page.exit_ip_value.setText("Not verified")
+            self.connection_page.duration_value.setText("Unknown")
+            self._set_connection_state(
+                "Not Connected",
+                "The OnionGate CLI reports the gateway inactive.",
+                "neutral",
+            )
+            self.connection_page.progress.hide()
+        self._notify(
+            "OnionGate",
+            "Tor connection verified."
+            if getattr(runtime, "state", "") == "Active · Tor verified"
+            else "OnionGate stopped.",
+        )
+        self.refresh_diagnostics()
+
+    def _connection_error(self, detail: str) -> None:
+        if not self.connection_manager.is_connected:
+            self.duration_timer.stop()
+        self._set_connection_state("Connection error", detail, "bad")
+        self._notify("OnionGate connection error", detail[:250])
+
+    def _notify(self, title: str, message: str) -> None:
+        if self.notifications_enabled and self.tray_icon is not None:
+            self.tray_icon.showMessage(title, message)
+
+    def closeEvent(self, event: QCloseEvent) -> None:
+        if (
+            self.connection_manager.process.state()
+            != QProcess.ProcessState.NotRunning
+        ):
+            QMessageBox.information(
+                self,
+                "OnionGate operation in progress",
+                "Wait for the current CLI operation to finish before closing the GUI.",
+            )
+            event.ignore()
+            return
+        event.accept()
+
+    def _update_duration(self) -> None:
+        self.connection_page.duration_value.setText(
+            connection_duration(self.session_started)
+        )
 
 def main() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
+    app.setOrganizationName(APP_NAME)
     app.setApplicationVersion(APP_VERSION)
     app.setFont(QFont("Arial", 10))
     window = OnionGateWindow()

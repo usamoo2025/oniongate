@@ -7,6 +7,7 @@ from unittest.mock import patch
 import stat
 
 from gui.diagnostics import (
+    check_bridge_configuration,
     check_executable,
     collect_diagnostics,
     detect_distribution,
@@ -100,6 +101,17 @@ class DiagnosticsTests(unittest.TestCase):
         )
         self.assertTrue(snowflake.available)
         self.assertIn("snowflake", snowflake.detail)
+
+    def test_bridge_configuration_ignores_comments(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / "oniongate.conf"
+            config.write_text(
+                "# obfs4 192.0.2.1:443 fingerprint cert=x\n"
+                "obfs4 192.0.2.2:443 fingerprint cert=y\n",
+                encoding="utf-8",
+            )
+            result = check_bridge_configuration("obfs4", config)
+        self.assertTrue(result.available)
 
 
 if __name__ == "__main__":

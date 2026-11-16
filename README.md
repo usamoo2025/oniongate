@@ -6,7 +6,8 @@
 
 OnionGate is an independent project and is not official Tor Project software.
 It provides a command-line interface for the existing Bash gateway backend
-and an optional PySide6 desktop GUI for read-only diagnostics.
+and an optional PySide6 desktop GUI for status, diagnostics, and user-confirmed
+connection controls.
 
 [GitHub Profile](https://github.com/usamoo2025) •
 [Repository](https://github.com/usamoo2025/oniongate) •
@@ -27,10 +28,10 @@ provides direct Tor mode and optional obfs4, Snowflake, and meek_lite bridge
 modes, with commands to start, stop, and inspect OnionGate.
 
 The optional PySide6 desktop application works alongside the existing CLI; it
-does not replace or reimplement the gateway. The GUI is intentionally
-read-only: it reports installation details and diagnostics but does not start
-or stop the gateway, modify firewall rules, change routing, or edit the
-configuration. OnionGate is not official Tor Project software and is not
+does not replace or reimplement the gateway. After an explicit user action and
+confirmation, the GUI can ask the existing CLI to start or stop OnionGate
+through `pkexec`. The Bash backend remains responsible for Tor, firewall, and
+DNS behavior. OnionGate is not official Tor Project software and is not
 affiliated with the Tor Project.
 
 ## Features
@@ -38,17 +39,19 @@ affiliated with the Tor Project.
 - Bash CLI for the gateway backend and its existing start, stop, status,
   version, help, and uninstall commands.
 - Debian- and Arch-family package-manager detection in the installer.
-- Optional dark PySide6 desktop interface with Overview, Diagnostics,
-  Settings, and About pages.
+- Optional dark/light PySide6 interface with Dashboard, Locations,
+  Connection, Bridges, Diagnostics, Settings, and About pages.
 - Read-only checks for distribution, CLI, Tor, configuration, logs, status,
   required utilities, and optional bridge transport binaries.
 - Existing CLI bridge modes: direct, obfs4 (`-o`), Snowflake (`-s`), and
   meek_lite (`-m`).
+- Optional Tor country exit preference via `--country CODE`. Relay availability
+  and observed exit country are not currently queried.
 
 Configure supported bridge transports and inspect your installation through
-the CLI or GUI. Country selection is not supported by the current CLI; the
-GUI does not expose it or edit configuration files. No systemd dependency is
-assumed by the GUI.
+the CLI or GUI. A selected country is only Tor's `ExitNodes` preference; it
+does not guarantee an exit in that country. No systemd dependency is assumed
+by the GUI.
 
 ## Supported distribution targets
 
@@ -71,8 +74,10 @@ work.** Package availability and runtime behavior can vary.
 ### Desktop GUI
 
 - Python 3 and PySide6.
-- The installed OnionGate CLI for backend version/help/status integration.
-- No PolicyKit or automatic privilege escalation is used by the GUI.
+- The installed OnionGate CLI.
+- `pkexec` is needed for GUI start/stop controls. If it is unavailable, the GUI
+  leaves those controls disabled and directs you to the manual CLI commands.
+- Administrative commands are never launched automatically.
 
 ## Installation
 
@@ -155,34 +160,36 @@ oniongate-gui
 ## About the GUI
 
 The desktop application is a PySide6 companion to the Bash CLI, not a second
-gateway implementation. It is intentionally read-only: it does not start or
-stop OnionGate, alter firewall rules, change system routing, edit the bridge
-configuration, or run `sudo`/`pkexec`.
+gateway implementation. Start and stop actions require a button click, a
+confirmation, and `pkexec`; the GUI does not run `sudo` or directly edit
+firewall, routing, or system configuration.
 
-The sidebar contains four pages:
+The sidebar contains seven pages:
 
-- **Overview:** Shows whether the CLI and Tor executable are available, the
-  version reported by the CLI, configuration-file availability, required
-  utility checks, recent diagnostic information, and runtime status only when
-  the backend reports a recognized result.
+- **Dashboard:** Shows installation and dependency state, actual CLI-reported
+  runtime status, selected exit preference, and a connection control.
+- **Locations:** Offers Automatic and common country preferences. Availability
+  is explicitly shown as not queried; a preference is not a relay guarantee.
+- **Connection:** Starts/stops the existing CLI backend and reports verified
+  Tor connectivity, reported exit IP, observed country availability, and
+  session duration. Duration is only tracked for the current GUI session.
+- **Bridges:** Shows direct, obfs4, Snowflake, and meek_lite modes and checks
+  local transport/configuration availability before enabling a connection.
 - **Diagnostics:** Lists the detected Linux distribution and package
   managers, CLI/version/help/status checks, Tor and optional bridge
   transport executables, required system utilities, and accessibility of
   configuration, status, and log files. Use **Refresh checks** to run them
   again.
-- **Settings:** Describes the configuration path and options the existing
-  backend supports. Country selection is marked unavailable because the CLI
-  has no country-selection command. The GUI does not silently edit
-  configuration.
+- **Settings:** Saves user-scoped theme, default location/bridge, and log
+  display preferences. It does not silently rewrite `/etc/oniongate/`.
 - **About:** Identifies OnionGate as an independent project that is not
   official Tor Project software.
 
-The GUI communicates with the installed CLI using its existing `version`,
-`help`, and `status` commands, with timeouts. The current CLI `status` command
-may check Tor connectivity when OnionGate is active; a failed check or
-unrecognized response is not presented as a verified connection. The GUI
-also reads the configuration and log paths shown below. Access errors appear
-in diagnostics rather than being treated as success.
+The GUI communicates with the installed CLI using its existing commands and
+the optional `--country` preference. It shows Connected only after the CLI
+reports ACTIVE and a successful Tor connectivity check. Relay availability,
+observed exit country, and bootstrap percentages are not fabricated; they are
+shown only when the backend provides evidence.
 
 ## Development setup
 
@@ -192,7 +199,7 @@ Create and activate a virtual environment from the repository root:
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install PySide6
-python gui/oniongate_gui.py
+python gui/app.py
 ```
 
 The GUI checks standard installation paths and `PATH` for the backend. It
@@ -225,6 +232,8 @@ sudo oniongate start             # Start in direct mode
 sudo oniongate start -o          # Start with obfs4
 sudo oniongate start -s          # Start with Snowflake
 sudo oniongate start -m          # Start with meek_lite
+sudo oniongate start --country de # Prefer German exits
+sudo oniongate start -o --country nl
 sudo oniongate start -v          # Start with verbose Tor output
 sudo oniongate start --spoof-mac # Explicitly opt in to MAC changes
 sudo oniongate status
@@ -233,10 +242,9 @@ oniongate version
 oniongate help
 ```
 
-The existing backend does not support a country option; do not pass
-`--country`. To configure bridges, edit `/etc/oniongate/oniongate.conf`
-explicitly and use the documented bridge syntax. The GUI only reports the
-configuration path and does not change it.
+`--country` sets Tor's ExitNodes preference and does not ensure a usable exit
+exists there; Tor may use another country if necessary. Bridge lines are
+configured explicitly in `/etc/oniongate/oniongate.conf`.
 
 ## Paths
 
@@ -258,15 +266,16 @@ operations:
 2. Checks for required utilities and the Tor service account.
 3. Reads the selected bridge lines from `/etc/oniongate/oniongate.conf` when
    a bridge mode is requested.
-4. Prepares OnionGate's private Tor configuration.
+4. Prepares OnionGate's private Tor configuration, including an optional
+   country exit preference, and validates it before applying firewall rules.
 5. Creates or updates its own firewall chains for supported traffic.
 6. Starts the Tor process managed by OnionGate.
 7. Checks Tor connectivity and records the runtime status.
 
 Starting the gateway changes firewall state and can affect network
-connectivity. Use the CLI only when you understand these effects. The GUI
-does not perform these administrative operations: it uses the CLI's existing
-`version`, `help`, and `status` commands and displays read-only diagnostics.
+connectivity. Use the CLI only when you understand these effects. GUI
+connection actions invoke the same CLI after explicit confirmation; they do
+not implement a separate networking engine.
 
 When stopped, the CLI stops the Tor process it started, removes its
 OnionGate-owned rules, and clears its runtime status. Do not assume this
@@ -301,19 +310,17 @@ OnionGate protects every connection.
 
 ## Diagnostics and limitations
 
-The GUI runs the existing CLI's `version`, `help`, and `status` commands with
-timeouts and reads the real configuration/status/log paths. The CLI `status`
-command can make a Tor connectivity request when the gateway is active; a
-timeout or unrecognized output is shown as unknown, not as a fabricated
-connection state. The GUI never calls the CLI's `start`, `stop`, or
-`uninstall` commands.
+The GUI runs CLI status and diagnostics with timeouts and reads the real
+configuration/status/log paths. Start and stop use the installed CLI through
+`pkexec` only after a user action and confirmation. A timeout or unrecognized
+status is shown as unknown, not as a fabricated connection state.
 
 OnionGate does not guarantee complete anonymity or route all protocols
 through Tor. UDP traffic, private/local destinations, applications using
 independent encrypted DNS, VPNs, or other network paths may not be covered.
 Firewall and network configuration changes are performed by the existing
-privileged CLI backend, not by the GUI. Review the backend behavior and
-network risks before use.
+privileged CLI backend, not by separate Python networking code. Review the
+backend behavior and network risks before use.
 
 ## Security Considerations
 
@@ -330,9 +337,9 @@ security practices:
 
 The CLI makes privileged firewall and network changes when you start the
 gateway. Incorrect configuration or conflicts with other network tools can
-interrupt connectivity. The GUI does not make these changes. Never blindly
-flush the system firewall to troubleshoot OnionGate; that could remove rules
-belonging to other applications.
+interrupt connectivity. GUI actions invoke the backend only after explicit
+confirmation. Never blindly flush the system firewall to troubleshoot
+OnionGate; that could remove rules belonging to other applications.
 
 ## Troubleshooting
 

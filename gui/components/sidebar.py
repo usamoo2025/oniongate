@@ -6,7 +6,15 @@ from PySide6.QtWidgets import QFrame, QLabel, QPushButton, QVBoxLayout
 
 class Sidebar(QFrame):
     page_selected = Signal(int)
-    pages = ("Overview", "Diagnostics", "Settings", "About")
+    pages = (
+        "Dashboard",
+        "Locations",
+        "Connection",
+        "Bridges",
+        "Diagnostics",
+        "Settings",
+        "About",
+    )
 
     def __init__(self) -> None:
         super().__init__()
@@ -58,9 +66,9 @@ class Sidebar(QFrame):
         footer_layout = QVBoxLayout(footer_panel)
         footer_layout.setContentsMargins(12, 12, 12, 12)
         footer_layout.setSpacing(6)
-        mode = QLabel("READ-ONLY MODE")
+        mode = QLabel("TOR GATEWAY")
         mode.setObjectName("SidebarMode")
-        footer = QLabel("Gateway controls stay in the OnionGate CLI.")
+        footer = QLabel("Connection controls use the installed OnionGate CLI.")
         footer.setObjectName("SidebarFooter")
         footer.setWordWrap(True)
         footer_layout.addWidget(mode)

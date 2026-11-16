@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import os
+import re
 import shlex
 import shutil
 import stat
+import subprocess
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
@@ -30,6 +32,12 @@ REQUIRED_UTILITIES = (
 OPTIONAL_TRANSPORTS = {
     "obfs4proxy": ("obfs4proxy",),
     "snowflake": ("snowflake-client", "snowflake"),
+}
+
+BRIDGE_CONFIG_PATTERNS = {
+    "obfs4": r"^[ \t]*obfs4[ \t]+",
+    "snowflake": r"^[ \t]*snowflake[ \t]+",
+    "meek": r"^[ \t]*meek_lite[ \t]+",
 }
 
 
@@ -129,6 +137,74 @@ def check_executable(name: str, which=shutil.which) -> Diagnostic:
     )
 
 
+def check_bridge_configuration(
+    bridge: str,
+    config_path: Path = CONFIG_FILE,
+) -> Diagnostic:
+    pattern = BRIDGE_CONFIG_PATTERNS.get(bridge)
+    if pattern is None:
+        return Diagnostic(f"{bridge} bridge configuration", False, "Unknown bridge mode")
+    try:
+        with config_path.open("r", encoding="utf-8", errors="replace") as stream:
+            configured = any(
+                re.search(pattern, line, re.IGNORECASE)
+                for line in stream
+            )
+    except OSError as exc:
+        return Diagnostic(f"{bridge} bridge configuration", False, str(exc))
+    return Diagnostic(
+        f"{bridge} bridge configuration",
+        configured,
+        "Bridge lines found" if configured else f"No {bridge} bridge lines in {config_path}",
+    )
+
+
+def check_tor_service_account(which=shutil.which) -> Diagnostic:
+    id_executable = which("id")
+    if id_executable is None:
+        return Diagnostic("Tor service account", False, "The id utility was not found")
+    for username in ("debian-tor", "tor"):
+        try:
+            result = subprocess.run(
+                (id_executable, username),
+                capture_output=True,
+                text=True,
+                timeout=2,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            return Diagnostic(
+                "Tor service account",
+                False,
+                "Timed out checking the Tor service account",
+            )
+        except OSError as exc:
+            return Diagnostic("Tor service account", False, str(exc))
+        if result.returncode == 0:
+            return Diagnostic(
+                "Tor service account",
+                True,
+                f"{username} is available",
+            )
+    return Diagnostic(
+        "Tor service account",
+        False,
+        "Neither debian-tor nor tor account was found",
+    )
+
+
+def check_init_system(path: Path = Path("/proc/1/comm")) -> Diagnostic:
+    try:
+        name = path.read_text(encoding="utf-8", errors="replace").strip()
+    except OSError as exc:
+        return Diagnostic("Init system", None, f"Could not identify init system: {exc}")
+    return Diagnostic(
+        "Init system",
+        True if name else None,
+        name or "Init system name is empty",
+    )
+
+
 def collect_diagnostics(
     *,
     backend_path: Path | None,
@@ -170,6 +246,16 @@ def collect_diagnostics(
         )
     )
     results.extend(check_executable(name, which) for name in REQUIRED_UTILITIES)
+    results.append(check_executable("pkexec", which))
+    results.append(check_tor_service_account(which))
+    results.append(check_init_system())
+    results.append(
+        Diagnostic(
+            "Tor service model",
+            True,
+            "OnionGate starts and manages its own Tor process; no systemd service is assumed.",
+        )
+    )
 
     for display_name, candidates in OPTIONAL_TRANSPORTS.items():
         found = [(name, check_executable(name, which)) for name in candidates]

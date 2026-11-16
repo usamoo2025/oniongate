@@ -22,7 +22,7 @@ class AboutPage(QWidget):
         description = QLabel(
             "OnionGate is an independent Linux project, not official Tor Project software. "
             "The Bash CLI remains the gateway backend; this PySide6 application "
-            "provides a read-only desktop view."
+            "provides diagnostics and user-confirmed controls that call the CLI."
         )
         description.setObjectName("HeroDescription")
         description.setWordWrap(True)
@@ -35,7 +35,7 @@ class AboutPage(QWidget):
         cards.setSpacing(12)
         for heading_text, body_text in (
             ("CLI BACKEND", "Gateway operations and supported bridge modes stay in the existing Bash CLI."),
-            ("DESKTOP COMPANION", "Inspect installation details, diagnostics, and runtime output without changing system state."),
+            ("DESKTOP COMPANION", "Review diagnostics and use explicit, confirmed controls through the existing CLI backend."),
         ):
             card = QFrame()
             card.setObjectName("InfoCard")

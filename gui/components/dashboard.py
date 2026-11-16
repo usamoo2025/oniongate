@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .connection_button import ConnectionButton
 from .status_cards import StatusCard
 
 
@@ -42,11 +43,44 @@ class DashboardPage(QWidget):
         hero_copy.addWidget(description)
         hero_layout.addLayout(hero_copy, 1)
 
-        mode = QLabel("READ-ONLY MODE")
-        mode.setObjectName("ReadOnlyBadge")
-        mode.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        hero_layout.addWidget(mode, 0, Qt.AlignmentFlag.AlignVCenter)
+        self.connection_status = QLabel("Checking status…")
+        self.connection_status.setObjectName("ConnectionStatus")
+        self.connection_status.setProperty("tone", "neutral")
+        self.connection_button = ConnectionButton()
+        controls = QVBoxLayout()
+        controls.addWidget(self.connection_status)
+        controls.addWidget(self.connection_button)
+        hero_layout.addLayout(controls)
         layout.addWidget(hero)
+
+        location = QFrame()
+        location.setObjectName("InfoCard")
+        location_layout = QHBoxLayout(location)
+        location_layout.setContentsMargins(17, 12, 17, 12)
+        location_title = QLabel("EXIT PREFERENCE")
+        location_title.setObjectName("CardHeading")
+        self.location_value = QLabel("Automatic · Tor chooses")
+        self.location_value.setObjectName("CardValue")
+        self.bridge_value = QLabel("Direct connection")
+        self.bridge_value.setObjectName("MutedText")
+        location_copy = QVBoxLayout()
+        location_copy.addWidget(location_title)
+        location_copy.addWidget(self.location_value)
+        location_copy.addWidget(self.bridge_value)
+        location_layout.addLayout(location_copy, 1)
+        self.change_location_button = QPushButton("Change location")
+        self.change_location_button.setObjectName("SecondaryButton")
+        location_layout.addWidget(self.change_location_button)
+        self.change_bridge_button = QPushButton("Change bridge")
+        self.change_bridge_button.setObjectName("SecondaryButton")
+        location_layout.addWidget(self.change_bridge_button)
+        self.connection_settings_button = QPushButton("Connection details")
+        self.connection_settings_button.setObjectName("SecondaryButton")
+        location_layout.addWidget(self.connection_settings_button)
+        self.diagnostics_button = QPushButton("Diagnostics")
+        self.diagnostics_button.setObjectName("SecondaryButton")
+        location_layout.addWidget(self.diagnostics_button)
+        layout.addWidget(location)
 
         cards = QGridLayout()
         cards.setHorizontalSpacing(12)
@@ -92,3 +126,22 @@ class DashboardPage(QWidget):
             Qt.AlignmentFlag.AlignRight,
         )
         layout.addStretch()
+
+    def set_connection_state(self, state: str, detail: str, tone: str) -> None:
+        self.connection_status.setText(state)
+        self.connection_status.setToolTip(detail)
+        self.connection_status.setProperty("tone", tone)
+        self.connection_status.style().unpolish(self.connection_status)
+        self.connection_status.style().polish(self.connection_status)
+        self.connection_button.set_state(
+            "connected"
+            if state == "Connected"
+            else "connecting"
+            if state == "Connecting to Tor"
+            else "disconnecting"
+            if state == "Disconnecting"
+            else "error"
+            if state == "Connection error"
+            else "disconnected",
+            enabled=state in ("Not Connected", "Connected", "Connection error"),
+        )

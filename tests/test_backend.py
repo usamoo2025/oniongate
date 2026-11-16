@@ -42,9 +42,20 @@ class BackendTests(unittest.TestCase):
         )
         self.assertEqual(
             parse_status_output(
-                "OnionGate Status: ACTIVE\nTor Connection: OK"
+                "OnionGate Status: ACTIVE\nTor Connection: OK\nTor Exit IP: 198.51.100.8"
             ).state,
             "Active · Tor verified",
+        )
+        self.assertEqual(
+            parse_status_output(
+                "OnionGate Status: ACTIVE\nTor Connection: OK\nTor Exit IP: 198.51.100.8"
+            ).exit_ip,
+            "198.51.100.8",
+        )
+        self.assertIsNone(
+            parse_status_output(
+                "OnionGate Status: ACTIVE\nTor Connection: OK\nTor Exit IP: 999.999.999.999"
+            ).exit_ip
         )
         self.assertEqual(
             parse_status_output(

@@ -196,11 +196,20 @@ install_gui() {
     log_info "Installing optional OnionGate GUI dependencies..."
     local required_file
     local gui_files=(
+        app.py
         oniongate_gui.py
         backend.py
         diagnostics.py
+        connection_manager.py
+        country_manager.py
+        theme.py
+        workers.py
         components/__init__.py
         components/about.py
+        components/bridge_selector.py
+        components/connection.py
+        components/connection_button.py
+        components/country_selector.py
         components/dashboard.py
         components/diagnostics.py
         components/settings.py
@@ -241,7 +250,7 @@ install_gui() {
     install -d -m 0755 "$(dirname "$GUI_LAUNCHER")"
     cat > "$GUI_LAUNCHER" <<EOF
 #!/bin/sh
-exec "$GUI_VENV/bin/python" "$GUI_INSTALL_DIR/oniongate_gui.py" "\$@"
+exec "$GUI_VENV/bin/python" "$GUI_INSTALL_DIR/app.py" "\$@"
 EOF
     chmod 0755 "$GUI_LAUNCHER"
 
@@ -250,7 +259,7 @@ EOF
 [Desktop Entry]
 Type=Application
 Name=OnionGate
-Comment=Read-only OnionGate system diagnostics
+Comment=Manage and diagnose the OnionGate Tor gateway
 Exec=$GUI_LAUNCHER
 Icon=$GUI_ROOT/assets/oniongate-banner.png
 Terminal=false

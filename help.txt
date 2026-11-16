@@ -45,6 +45,7 @@ OPTIONS (used with start)
     -o, --obfs4     Use obfs4 bridge
     -s, --snowflake  Use Snowflake bridge
     -m, --meek       Use meek_lite bridge
+    --country CODE   Prefer Tor exits in a two-letter country code (example: de)
     -v, --verbose    Show additional Tor log output
 
     --spoof-mac      Enable optional MAC address spoofing
@@ -63,6 +64,8 @@ EXAMPLES
     sudo oniongate start -o           # obfs4 bridge
     sudo oniongate start -s           # Snowflake bridge
     sudo oniongate start -m           # meek_lite bridge
+    sudo oniongate start --country de # Prefer German exits
+    sudo oniongate start -o --country nl
     sudo oniongate start -o -v        # obfs4 with verbose output
     sudo oniongate start --spoof-mac  # Enable MAC spoofing
     sudo oniongate stop               # Stop OnionGate
@@ -152,6 +155,9 @@ BRIDGE TYPES
 
 CONFIGURATION
 -------------
+
+Country selection adds a Tor ExitNodes preference. It does not guarantee that a
+working exit relay is available; Tor may use another country if necessary.
 
     Main configuration:
 

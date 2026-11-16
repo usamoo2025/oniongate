@@ -33,6 +33,7 @@ NON_TOR="127.0.0.0/8 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16"
 VERBOSE=false
 LOG_TAIL_PID=""
 ACTIVE_BRIDGE=""
+EXIT_COUNTRY=""
 
 # ============================================
 # Banner Function
@@ -579,6 +580,13 @@ EOF
     log_success "Tor configured with meek_lite bridge(s)"
 }
 
+append_country_preference() {
+    if [[ -n "$EXIT_COUNTRY" ]]; then
+        printf 'ExitNodes {%s}\n' "$EXIT_COUNTRY" >> "$TORRC_FILE"
+        log_info "Tor exit-country preference set to: $EXIT_COUNTRY"
+    fi
+}
+
 # ============================================
 # Tor Service Management
 # ============================================
@@ -770,6 +778,20 @@ cmd_start() {
             exit 1
             ;;
     esac
+
+    append_country_preference
+
+    if [[ -n "$EXIT_COUNTRY" ]]; then
+        mkdir -p "$ONIONGATE_DIR/data"
+        chown -R "$TOR_USER:$TOR_USER" "$ONIONGATE_DIR/data"
+        chmod 700 "$ONIONGATE_DIR/data"
+        chown "$TOR_USER:$TOR_USER" "$TORRC_FILE"
+        chmod 600 "$TORRC_FILE"
+        if ! tor --verify-config -f "$TORRC_FILE" >/dev/null; then
+            log_error "Tor configuration validation failed; firewall settings were not changed"
+            exit 1
+        fi
+    fi
     echo ""
     
     if [[ "$SPOOF_MAC" == "true" ]]; then
@@ -894,6 +916,7 @@ OPTIONS (used with start):
     -o, --obfs4     Start OnionGate using obfs4 bridge
     -s, --snowflake Start OnionGate using snowflake bridge
     -m, --meek      Start OnionGate using meek_lite bridge
+    --country CODE Prefer Tor exits in the specified two-letter country (for example: de)
     -v, --verbose   Show full Tor log output
     --spoof-mac     Opt in to temporary MAC address changes (may disrupt connectivity)
 
@@ -977,6 +1000,18 @@ main() {
                     -m|--meek)
                         bridge_type="meek"
                         ;;
+                    --country)
+                        if [[ $# -lt 2 || -z "$2" ]]; then
+                            log_error "--country requires a two-letter country code"
+                            exit 1
+                        fi
+                        EXIT_COUNTRY="${2,,}"
+                        if [[ ! "$EXIT_COUNTRY" =~ ^[a-z]{2}$ ]]; then
+                            log_error "Invalid country code: $2 (expected two letters)"
+                            exit 1
+                        fi
+                        shift
+                        ;;
                     -v|--verbose)
                         VERBOSE=true
                         ;;
@@ -1027,6 +1062,7 @@ main() {
             echo "    -o, --obfs4     Start OnionGate using obfs4 bridge"
             echo "    -s, --snowflake Start OnionGate using snowflake bridge"
             echo "    -m, --meek      Start OnionGate using meek_lite bridge"
+            echo "    --country CODE Prefer Tor exits in the specified two-letter country"
             echo "    -v, --verbose   Show full Tor log output"
             echo "    --spoof-mac     Opt in to temporary MAC address changes (may disrupt connectivity)"
             echo ""

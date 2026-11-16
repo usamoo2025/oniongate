@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import re
 import shutil
 import subprocess
@@ -37,6 +38,7 @@ class CommandResult:
 class RuntimeStatus:
     state: str
     detail: str
+    exit_ip: str | None = None
 
 
 def find_backend(
@@ -105,9 +107,24 @@ def parse_status_output(output: str) -> RuntimeStatus:
                 "CLI reports active, but its Tor connectivity check failed.",
             )
         if re.search(r"Tor Connection:\s*OK\b", output, re.IGNORECASE):
+            ip_match = re.search(
+                r"Tor Exit IP:\s*([0-9a-fA-F:.]+)\b",
+                output,
+                re.IGNORECASE,
+            )
+            exit_ip = None
+            if ip_match:
+                try:
+                    exit_ip = str(ipaddress.ip_address(ip_match.group(1)))
+                except ValueError:
+                    pass
+            detail = "CLI reports active and its Tor connectivity check succeeded."
+            if ip_match and exit_ip is None:
+                detail += " Its reported exit IP was invalid."
             return RuntimeStatus(
                 "Active · Tor verified",
-                "CLI reports active and its Tor connectivity check succeeded.",
+                detail,
+                exit_ip,
             )
         return RuntimeStatus(
             "Active · connection unverified",
