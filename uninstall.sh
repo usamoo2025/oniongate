@@ -341,19 +341,22 @@ remove_uninstaller() {
 # Remove Configuration
 # ============================================
 
-remove_config_dir() {
-
-    log_info "Removing OnionGate configuration directory..."
+preserve_config_dir() {
 
     if [[ -d "$ONIONGATE_DIR" ]]; then
-
-        rm -rf -- "$ONIONGATE_DIR"
-
-        log_success "Configuration directory removed: $ONIONGATE_DIR"
-
+        log_info "Preserving OnionGate configuration and data: $ONIONGATE_DIR"
     else
         log_info "Configuration directory not found. Skipping."
     fi
+}
+
+remove_gui() {
+    log_info "Removing OnionGate GUI application files..."
+    rm -f -- /usr/local/bin/oniongate-gui
+    rm -f -- /usr/local/share/applications/oniongate.desktop
+    rm -rf -- /opt/oniongate/gui /opt/oniongate/venv /opt/oniongate/assets
+    rmdir /opt/oniongate 2>/dev/null || true
+    log_success "GUI application files removed."
 }
 
 # ============================================
@@ -438,13 +441,13 @@ main() {
 
     echo ""
 
-    remove_config_dir
+    remove_gui
 
     echo ""
 
-    # Service state backup is inside the config directory.
-    # Therefore, restore it before deleting that directory.
-    # See the note below about moving this operation.
+    preserve_config_dir
+
+    echo ""
 
     remove_uninstaller
 

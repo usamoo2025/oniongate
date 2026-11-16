@@ -1,0 +1,1 @@
+"""OnionGate desktop application package."""

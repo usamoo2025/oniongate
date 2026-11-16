@@ -10,8 +10,14 @@ set -Eeuo pipefail
 ONIONGATE_DIR="/etc/oniongate"
 INSTALL_BIN="/usr/local/bin/oniongate"
 UNINSTALL_BIN="/usr/local/sbin/oniongate-uninstall"
+GUI_ROOT="/opt/oniongate"
+GUI_INSTALL_DIR="$GUI_ROOT/gui"
+GUI_VENV="$GUI_ROOT/venv"
+GUI_LAUNCHER="/usr/local/bin/oniongate-gui"
+DESKTOP_FILE="/usr/local/share/applications/oniongate.desktop"
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+INSTALL_GUI=false
 
 # ============================================
 # Colors
@@ -46,6 +52,25 @@ log_warning() {
 die() {
     log_error "$1"
     exit 1
+}
+
+parse_arguments() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --with-gui)
+                INSTALL_GUI=true
+                ;;
+            -h|--help)
+                echo "Usage: sudo ./install.sh [--with-gui]"
+                echo "  --with-gui  Install the optional PySide6 desktop application"
+                exit 0
+                ;;
+            *)
+                die "Unknown installer option: $1"
+                ;;
+        esac
+        shift
+    done
 }
 
 # ============================================
@@ -165,6 +190,82 @@ install_dependencies() {
     fi
 
     log_success "Core dependencies installed."
+}
+
+install_gui() {
+    log_info "Installing optional OnionGate GUI dependencies..."
+    local required_file
+    local gui_files=(
+        oniongate_gui.py
+        backend.py
+        diagnostics.py
+        components/__init__.py
+        components/about.py
+        components/dashboard.py
+        components/diagnostics.py
+        components/settings.py
+        components/sidebar.py
+        components/status_cards.py
+    )
+    for required_file in "${gui_files[@]}"; do
+        [[ -f "$SCRIPT_DIR/gui/$required_file" ]] ||
+            die "Required GUI source file not found: $SCRIPT_DIR/gui/$required_file"
+    done
+
+    if [[ "$DISTRO_FAMILY" == "debian" ]]; then
+        DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            python3 python3-venv python3-pip
+    else
+        pacman -S --needed --noconfirm python python-pip
+    fi
+
+    local python_command
+    if [[ "$DISTRO_FAMILY" == "debian" ]]; then
+        python_command="python3"
+    else
+        python_command="python"
+    fi
+
+    install -d -m 0755 "$GUI_ROOT" "$GUI_INSTALL_DIR"
+    "$python_command" -m venv "$GUI_VENV"
+    "$GUI_VENV/bin/python" -m pip install --upgrade pip PySide6
+
+    while IFS= read -r -d '' source_file; do
+        local relative_path="${source_file#"$SCRIPT_DIR/gui/"}"
+        install -D -m 0644 "$source_file" "$GUI_INSTALL_DIR/$relative_path"
+    done < <(find "$SCRIPT_DIR/gui" -type f -name '*.py' -print0)
+
+    install -d -m 0755 "$GUI_ROOT/assets"
+    install -m 0644 "$SCRIPT_DIR/assets/oniongate-banner.png" \
+        "$GUI_ROOT/assets/oniongate-banner.png"
+    install -d -m 0755 "$(dirname "$GUI_LAUNCHER")"
+    cat > "$GUI_LAUNCHER" <<EOF
+#!/bin/sh
+exec "$GUI_VENV/bin/python" "$GUI_INSTALL_DIR/oniongate_gui.py" "\$@"
+EOF
+    chmod 0755 "$GUI_LAUNCHER"
+
+    install -d -m 0755 "$(dirname "$DESKTOP_FILE")"
+    cat > "$DESKTOP_FILE" <<EOF
+[Desktop Entry]
+Type=Application
+Name=OnionGate
+Comment=Read-only OnionGate system diagnostics
+Exec=$GUI_LAUNCHER
+Icon=$GUI_ROOT/assets/oniongate-banner.png
+Terminal=false
+Categories=Network;System;
+EOF
+    chmod 0644 "$DESKTOP_FILE"
+
+    for required_file in "${gui_files[@]}"; do
+        [[ -f "$GUI_INSTALL_DIR/$required_file" ]] ||
+            die "GUI source installation failed: $GUI_INSTALL_DIR/$required_file"
+    done
+    "$GUI_VENV/bin/python" -c 'import PySide6'
+    [[ -x "$GUI_LAUNCHER" && -f "$DESKTOP_FILE" ]] ||
+        die "GUI launcher installation failed."
+    log_success "GUI installed. Launch it with: oniongate-gui"
 }
 
 # ============================================
@@ -388,6 +489,7 @@ verify_installation() {
 
 main() {
 
+    parse_arguments "$@"
     show_banner
 
     check_root
@@ -407,6 +509,11 @@ main() {
     echo ""
 
     install_optional_dependencies
+
+    if [[ "$INSTALL_GUI" == "true" ]]; then
+        echo ""
+        install_gui
+    fi
 
     echo ""
 
@@ -435,27 +542,24 @@ main() {
     echo ""
 
     verify_installation
+    log_success "============================================"
+    log_success "       OnionGate installation complete!"
+    log_success "============================================"
+    echo ""
+    log_info "Configuration file: $ONIONGATE_DIR/oniongate.conf"
+    log_info "Add your bridges to the configuration file before using bridge options."
+    echo ""
+    log_info "Usage:"
+    echo "    sudo oniongate start           # Direct connection"
+    echo "    sudo oniongate start -o        # Use obfs4 bridge"
+    echo "    sudo oniongate start -s        # Use snowflake bridge"
+    echo "    sudo oniongate start -m        # Use meek_lite bridge"
+    echo "    sudo oniongate stop            # Stop and restore"
+    echo "    sudo oniongate help            # Show help"
+    if [[ "$INSTALL_GUI" == "true" ]]; then
+        echo "    oniongate-gui                  # Launch the desktop GUI"
+    fi
 }
-
-# ============================================
-# Installation Completion
-# ============================================
-
-log_success "============================================"
-log_success "       OnionGate installation complete!"
-log_success "============================================"
-echo ""
-log_info "Configuration file: $ONIONGATE_DIR/oniongate.conf"
-log_info "Add your bridges to the configuration file before using bridge options."
-echo ""
-log_info "Usage:"
-echo "    sudo oniongate start           # Direct connection"
-echo "    sudo oniongate start -o        # Use obfs4 bridge"
-echo "    sudo oniongate start -s        # Use snowflake bridge"
-echo "    sudo oniongate start -m        # Use meek_lite bridge"
-echo "    sudo oniongate stop            # Stop and restore"
-echo "    sudo oniongate help            # Show help"
-echo ""
 
 # ============================================
 # Execute Installer

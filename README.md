@@ -1,12 +1,16 @@
-# 🧅 OnionGate
+# OnionGate
 
-![OnionGate Banner](assets/oniongate-banner.png)
+![OnionGate banner](assets/oniongate-banner.png)
 
 **An open-source Tor gateway for Linux.**
 
-Manage Tor connections, select exit countries, configure bridge transports, and control supported network traffic through a command-line interface or a modern desktop GUI.
+OnionGate is an independent project and is not official Tor Project software.
+It provides a command-line interface for the existing Bash gateway backend
+and an optional PySide6 desktop GUI for read-only diagnostics.
 
-[GitHub Profile](https://github.com/usamoo2025) • [Repository](https://github.com/usamoo2025/oniongate) • [Report an Issue](https://github.com/usamoo2025/oniongate/issues)
+[GitHub Profile](https://github.com/usamoo2025) •
+[Repository](https://github.com/usamoo2025/oniongate) •
+[Report an Issue](https://github.com/usamoo2025/oniongate/issues)
 
 ![Platform](https://img.shields.io/badge/Platform-Linux-blue)
 ![Network](https://img.shields.io/badge/Network-Tor-purple)
@@ -14,460 +18,263 @@ Manage Tor connections, select exit countries, configure bridge transports, and 
 ![License](https://img.shields.io/badge/License-GPL--3.0-green)
 ![Status](https://img.shields.io/badge/Status-Development-orange)
 
----
+## About OnionGate
 
-## 📖 About OnionGate
+OnionGate is an independent open-source Linux project.
+It aims to provide a Tor-based gateway for supported Debian- and Arch-family
+distributions through a Bash backend and command-line interface. The backend
+provides direct Tor mode and optional obfs4, Snowflake, and meek_lite bridge
+modes, with commands to start, stop, and inspect OnionGate.
 
-**OnionGate** is an open-source Linux utility designed to configure a Tor-based network gateway.
+The optional PySide6 desktop application works alongside the existing CLI; it
+does not replace or reimplement the gateway. The GUI is intentionally
+read-only: it reports installation details and diagnostics but does not start
+or stop the gateway, modify firewall rules, change routing, or edit the
+configuration. OnionGate is not official Tor Project software and is not
+affiliated with the Tor Project.
 
-It provides two ways to manage your connection:
+## Features
 
-- **CLI:** Manage OnionGate directly from the Linux terminal.
-- **GUI:** Use a modern desktop application to manage connections, select exit countries, choose bridge transports, and view diagnostic information.
+- Bash CLI for the gateway backend and its existing start, stop, status,
+  version, help, and uninstall commands.
+- Debian- and Arch-family package-manager detection in the installer.
+- Optional dark PySide6 desktop interface with Overview, Diagnostics,
+  Settings, and About pages.
+- Read-only checks for distribution, CLI, Tor, configuration, logs, status,
+  required utilities, and optional bridge transport binaries.
+- Existing CLI bridge modes: direct, obfs4 (`-o`), Snowflake (`-s`), and
+  meek_lite (`-m`).
 
-Originally based on TorGate, the project has been renamed and adapted as OnionGate, with the goal of preserving its existing functionality while improving distribution compatibility, maintainability, and system-safety checks.
+Configure supported bridge transports and inspect your installation through
+the CLI or GUI. Country selection is not supported by the current CLI; the
+GUI does not expose it or edit configuration files. No systemd dependency is
+assumed by the GUI.
 
-## ✨ Features
+## Supported distribution targets
 
-### Network and Tor
+The installer and diagnostics target Debian-based distributions (including
+Debian, Ubuntu, Kali, Linux Mint, and Pop!_OS) and Arch-based distributions
+(including Arch Linux, Manjaro, and EndeavourOS). **These targets have not
+been verified on live Debian or Arch systems as part of this development
+work.** Package availability and runtime behavior can vary.
 
-- Tor gateway configuration.
-- Dedicated firewall chain management.
-- DNS redirection for supported traffic.
-- Supported outbound traffic restrictions.
-- obfs4, Snowflake, and meek_lite bridge modes.
-- Country-based Tor exit-node preferences.
-- Optional MAC address spoofing.
-- IPv6 firewall restrictions.
+## Requirements
+
+### Gateway backend
+
+- Bash and a supported Debian- or Arch-family Linux distribution.
+- Tor, curl, iproute2, iptables, ca-certificates, util-linux, and other
+  utilities checked by the backend.
+- Root privileges when installing or running gateway-changing CLI commands.
+- A compatible bridge transport and bridge configuration when using a bridge.
 
 ### Desktop GUI
 
-- Modern dark desktop interface.
-- Connect and disconnect controls.
-- Searchable country selector.
-- ISO country and territory selection.
-- Automatic Tor exit selection.
-- Bridge transport selection.
-- Connection status monitoring.
-- Observed Tor exit IP information.
-- Tor log viewer.
-- GUI authentication through PolicyKit (`pkexec`).
+- Python 3 and PySide6.
+- The installed OnionGate CLI for backend version/help/status integration.
+- No PolicyKit or automatic privilege escalation is used by the GUI.
 
-### CLI and system management
+## Installation
 
-- Original command-line workflow.
-- Debian- and Arch-based distribution detection.
-- Dependency detection.
-- Separate OnionGate configuration.
-- Configuration backup support.
-- OnionGate-specific firewall chains.
-
-> **Important:** OnionGate does not guarantee complete anonymity or complete traffic protection. Its gateway implementation focuses on TCP traffic and DNS redirection. Private/local destinations and unsupported protocols may not be routed through Tor. Applications using their own encrypted DNS, VPNs, or other network paths may behave differently.
-
-## 🐧 Supported Linux Distributions
-
-### Debian-based
-
-- Debian
-- Ubuntu
-- Linux Mint
-- Kali Linux
-- Pop!_OS
-- Zorin OS
-
-### Arch-based
-
-- Arch Linux
-- Manjaro
-- EndeavourOS
-- Artix Linux
-
-Compatibility depends on package availability, system configuration, firewall implementation, and installed Tor version.
-
-**Note:** These are supported distribution targets. Test installation and runtime behavior on each distribution before treating it as fully verified.
-
-## 📋 Requirements
-
-### Backend requirements
-
-- Supported Debian-based or Arch-based Linux distribution.
-- Root privileges for installation and network configuration.
-- Bash.
-- Tor.
-- iptables.
-- iproute2.
-- curl.
-- util-linux.
-- ca-certificates.
-
-Bridge transports require their corresponding transport software.
-
-### GUI requirements
-
-- Python 3.
-- Python virtual environment support.
-- PySide6.
-- PolicyKit (`pkexec`) for privileged GUI operations.
-- Installed OnionGate CLI backend.
-
-The GUI does not replace the Bash backend. It communicates with the existing `oniongate` command.
-
----
-
-# 📥 Installation
-
-## 1. Clone the repository
+Clone the project and enter its directory:
 
 ```bash
 git clone https://github.com/usamoo2025/oniongate.git
-```
-
-## 2. Enter the project directory
-
-```bash
 cd oniongate
 ```
 
-## 3. Make the installer executable
+Make the installer executable if necessary:
 
 ```bash
 chmod +x install.sh
 ```
 
-## 4. Install the OnionGate backend
+Install the CLI/backend:
 
 ```bash
 sudo ./install.sh
 ```
 
-The backend installer is intended to detect the supported distribution family, install required dependencies, and configure OnionGate.
+The installer detects the distribution family and uses its package manager.
+Existing `/etc/oniongate/oniongate.conf` is preserved on upgrade. The
+installer reports success only after required installation checks pass.
 
-Check that the CLI is available:
+Install the optional GUI and desktop launcher as well:
+
+```bash
+sudo ./install.sh --with-gui
+```
+
+This installs Python GUI dependencies in `/opt/oniongate/venv`, adds the
+`oniongate-gui` launcher, and installs a desktop entry. PySide6 installation
+requires access to the configured Python package index. Without
+`--with-gui`, the CLI installation is unchanged.
+
+Check the CLI:
 
 ```bash
 oniongate version
+oniongate help
 ```
 
-> Make sure `install.sh` is included in your repository. The backend must be installed before launching the desktop GUI.
+The installer installs the command at `/usr/local/bin/oniongate`. Check that
+your shell can find it with:
 
----
+```bash
+command -v oniongate
+```
 
-# 🖥️ Running OnionGate GUI
+### Install GUI dependencies manually
 
-OnionGate provides a graphical desktop interface built with **Python and PySide6**.
+If you prefer to install the GUI dependencies yourself rather than use
+`--with-gui`, install Python and virtual-environment support using your
+distribution's package manager:
 
-The GUI uses the existing OnionGate backend to manage Tor connections. You can continue using the terminal even if you install the GUI.
-
-## 1. Install Python and virtual environment support
-
-On Debian-based systems:
+Debian-based systems:
 
 ```bash
 sudo apt update
-sudo apt install python3 python3-pip python3-venv
+sudo apt install python3 python3-venv python3-pip
 ```
 
-On Arch-based systems:
+Arch-based systems:
 
 ```bash
 sudo pacman -S python python-pip
 ```
 
-## 2. Install PolicyKit
+Then follow the development setup below to create a virtual environment and
+install PySide6. Manual installation does not add a system desktop launcher.
 
-The GUI uses `pkexec` to request administrator privileges when starting or stopping the gateway.
-
-Install the appropriate PolicyKit package for your distribution.
-
-Check whether `pkexec` is available:
+Launch the installed GUI as your normal desktop user:
 
 ```bash
-command -v pkexec
+oniongate-gui
 ```
 
-If the command is missing, install the package that provides `pkexec` using your distribution's package manager.
+## About the GUI
 
-## 3. Create a Python virtual environment
+The desktop application is a PySide6 companion to the Bash CLI, not a second
+gateway implementation. It is intentionally read-only: it does not start or
+stop OnionGate, alter firewall rules, change system routing, edit the bridge
+configuration, or run `sudo`/`pkexec`.
 
-From the OnionGate project directory:
+The sidebar contains four pages:
+
+- **Overview:** Shows whether the CLI and Tor executable are available, the
+  version reported by the CLI, configuration-file availability, required
+  utility checks, recent diagnostic information, and runtime status only when
+  the backend reports a recognized result.
+- **Diagnostics:** Lists the detected Linux distribution and package
+  managers, CLI/version/help/status checks, Tor and optional bridge
+  transport executables, required system utilities, and accessibility of
+  configuration, status, and log files. Use **Refresh checks** to run them
+  again.
+- **Settings:** Describes the configuration path and options the existing
+  backend supports. Country selection is marked unavailable because the CLI
+  has no country-selection command. The GUI does not silently edit
+  configuration.
+- **About:** Identifies OnionGate as an independent project that is not
+  official Tor Project software.
+
+The GUI communicates with the installed CLI using its existing `version`,
+`help`, and `status` commands, with timeouts. The current CLI `status` command
+may check Tor connectivity when OnionGate is active; a failed check or
+unrecognized response is not presented as a verified connection. The GUI
+also reads the configuration and log paths shown below. Access errors appear
+in diagnostics rather than being treated as success.
+
+## Development setup
+
+Create and activate a virtual environment from the repository root:
 
 ```bash
 python3 -m venv .venv
-```
-
-Activate it:
-
-```bash
 source .venv/bin/activate
-```
-
-## 4. Install PySide6
-
-```bash
-python -m pip install --upgrade pip
 python -m pip install PySide6
-```
-
-## 5. Check the GUI files
-
-Your project should contain:
-
-```text
-oniongate/
-├── oniongate.sh
-├── install.sh
-├── gui/
-│   └── oniongate_gui.py
-├── assets/
-│   └── oniongate-banner.png
-├── README.md
-└── LICENSE
-```
-
-The backend should already be installed as:
-
-```text
-/usr/local/bin/oniongate
-```
-
-The GUI searches for the installed OnionGate command in the system PATH and standard installation locations.
-
-## 6. Launch OnionGate GUI
-
-With the virtual environment activated:
-
-```bash
 python gui/oniongate_gui.py
 ```
 
-Alternatively:
+The GUI checks standard installation paths and `PATH` for the backend. It
+does not need root to open or run checks. If Python reports that PySide6 is
+missing, confirm that the virtual environment is active and install it in
+that environment:
 
 ```bash
-.venv/bin/python gui/oniongate_gui.py
+python -m pip install PySide6
 ```
 
-You should now see the OnionGate desktop dashboard.
-
-**Important:** Run the GUI as your normal desktop user, not with `sudo`. It uses PolicyKit to request elevated privileges for administrative actions.
-
----
-
-# 🌍 Selecting a Tor Exit Country
-
-One of the main GUI features is the searchable country selector.
-
-You can select a country before starting OnionGate.
-
-### How to use it
-
-1. Open OnionGate GUI.
-2. Find the **Tor exit country** selector.
-3. Click the country search field.
-4. Type a country name.
-5. Select the matching country from the suggestions.
-6. Choose a bridge transport if needed.
-7. Click **Connect**.
-
-The selector includes an automatic option:
-
-**Automatic (Tor chooses)**
-
-When this option is selected, OnionGate does not pass a country preference to Tor.
-
-### Example
-
-Selecting Germany:
+Run unit tests and a syntax check from the repository root:
 
 ```bash
-sudo oniongate start --country de
+python -m compileall gui
+python -m unittest discover -s tests -v
 ```
 
-Selecting the Netherlands:
+The GUI smoke test uses Qt's offscreen platform when no desktop is available.
+
+## GUI screenshots
+
+Screenshots will be added after the interface is run and captured on a
+supported Linux desktop.
+
+## CLI quick reference
 
 ```bash
-sudo oniongate start --country nl
-```
-
-Selecting Japan:
-
-```bash
-sudo oniongate start --country jp
-```
-
-The GUI sends the selected two-letter ISO country code to the existing backend.
-
-### How country selection works
-
-The backend uses Tor configuration preferences:
-
-```text
-ExitNodes {de}
-StrictNodes 1
-```
-
-The country code `de` represents Germany.
-
-`StrictNodes 1` makes the preference strict. If Tor cannot find a suitable exit relay in the selected country, the connection may fail.
-
-**Important limitations:**
-
-- Country selection refers to the Tor exit relay, not your physical location.
-- Not every country has available Tor exit relays.
-- Selecting a country does not guarantee that an IP geolocation service will report that country.
-- A country preference can reduce the number of available exit relays.
-
----
-
-# 🌉 Bridge Selection
-
-The GUI also allows you to select a Tor transport.
-
-Available options:
-
-| Transport | Description |
-|---|---|
-| Direct connection | Connect using the normal Tor connection |
-| obfs4 | Use an obfs4 bridge |
-| Snowflake | Use the Snowflake transport |
-| meek_lite | Use the meek_lite transport |
-
-Bridge availability depends on the installed transport software and valid bridge configuration.
-
-### CLI bridge commands
-
-Direct connection:
-
-```bash
-sudo oniongate start
-```
-
-obfs4:
-
-```bash
-sudo oniongate start --obfs4
-```
-
-Snowflake:
-
-```bash
-sudo oniongate start --snowflake
-```
-
-meek_lite:
-
-```bash
-sudo oniongate start --meek
-```
-
-### Combine country and bridge selection
-
-For example, obfs4 with a German exit preference:
-
-```bash
-sudo oniongate start --obfs4 --country de
-```
-
-Snowflake with a Netherlands exit preference:
-
-```bash
-sudo oniongate start --snowflake --country nl
-```
-
----
-
-# 🚀 CLI Quick Start
-
-You can use OnionGate without opening the GUI.
-
-Start OnionGate:
-
-```bash
-sudo oniongate start
-```
-
-Check status:
-
-```bash
+sudo oniongate start             # Start in direct mode
+sudo oniongate start -o          # Start with obfs4
+sudo oniongate start -s          # Start with Snowflake
+sudo oniongate start -m          # Start with meek_lite
+sudo oniongate start -v          # Start with verbose Tor output
+sudo oniongate start --spoof-mac # Explicitly opt in to MAC changes
 sudo oniongate status
-```
-
-Stop OnionGate:
-
-```bash
 sudo oniongate stop
-```
-
-Display version:
-
-```bash
 oniongate version
-```
-
-Display help:
-
-```bash
 oniongate help
 ```
 
-## 🛠️ CLI Command Reference
+The existing backend does not support a country option; do not pass
+`--country`. To configure bridges, edit `/etc/oniongate/oniongate.conf`
+explicitly and use the documented bridge syntax. The GUI only reports the
+configuration path and does not change it.
 
-| Command | Description |
+## Paths
+
+| Purpose | Path |
 |---|---|
-| `sudo oniongate start` | Start OnionGate |
-| `sudo oniongate start -o` | Start with obfs4 |
-| `sudo oniongate start -s` | Start with Snowflake |
-| `sudo oniongate start -m` | Start with meek_lite |
-| `sudo oniongate start -v` | Start with verbose output |
-| `sudo oniongate start --country de` | Prefer a German exit relay |
-| `sudo oniongate start --spoof-mac` | Enable optional MAC spoofing |
-| `sudo oniongate stop` | Stop OnionGate |
-| `sudo oniongate status` | Display gateway status |
-| `oniongate version` | Display version |
-| `oniongate help` | Display help |
-| `sudo oniongate uninstall` | Uninstall OnionGate |
+| Configuration and application data | `/etc/oniongate/` |
+| Bridge configuration | `/etc/oniongate/oniongate.conf` |
+| Generated Tor configuration | `/etc/oniongate/torrc` |
+| Runtime status file | `/etc/oniongate/oniongate.status` |
+| Tor log | `/etc/oniongate/tor.log` |
+| GUI virtual environment (installed) | `/opt/oniongate/venv/` |
 
----
+## How OnionGate Works
 
-# ⚙️ Configuration
+When you start OnionGate from the CLI, the Bash backend performs these
+operations:
 
-OnionGate stores its configuration separately from the main system configuration.
+1. Checks root privileges and identifies the supported Linux distribution.
+2. Checks for required utilities and the Tor service account.
+3. Reads the selected bridge lines from `/etc/oniongate/oniongate.conf` when
+   a bridge mode is requested.
+4. Prepares OnionGate's private Tor configuration.
+5. Creates or updates its own firewall chains for supported traffic.
+6. Starts the Tor process managed by OnionGate.
+7. Checks Tor connectivity and records the runtime status.
 
-| Component | Location |
-|---|---|
-| Main directory | `/etc/oniongate/` |
-| Main configuration | `/etc/oniongate/oniongate.conf` |
-| Tor configuration | `/etc/oniongate/torrc` |
-| Status file | `/etc/oniongate/oniongate.status` |
-| Runtime status | `/run/oniongate.status` |
-| Log file | `/etc/oniongate/tor.log` |
-| Backup directory | `/etc/oniongate/backup/` |
-| Tor data directory | `/var/lib/oniongate/` |
+Starting the gateway changes firewall state and can affect network
+connectivity. Use the CLI only when you understand these effects. The GUI
+does not perform these administrative operations: it uses the CLI's existing
+`version`, `help`, and `status` commands and displays read-only diagnostics.
 
----
+When stopped, the CLI stops the Tor process it started, removes its
+OnionGate-owned rules, and clears its runtime status. Do not assume this
+covers traffic from every application or protocol.
 
-# 🔐 How OnionGate Works
+## Firewall and Traffic Handling
 
-At a high level, OnionGate performs the following operations when started:
-
-1. Checks root privileges and supported distribution.
-2. Checks required dependencies.
-3. Loads the OnionGate configuration.
-4. Detects the available Tor service user.
-5. Prepares the Tor configuration.
-6. Creates or updates OnionGate-owned firewall rules.
-7. Starts the managed Tor process.
-8. Checks whether the Tor connection is available.
-9. Reports the resulting gateway status.
-
-When stopped, OnionGate attempts to stop its managed Tor process and remove its own firewall rules.
-
-The GUI communicates with the CLI backend to perform administrative operations.
-
----
-
-# 🧱 Firewall and Traffic Handling
-
-OnionGate uses dedicated firewall chains:
+The backend uses dedicated firewall chains:
 
 ```text
 ONIONGATE_NAT
@@ -475,25 +282,43 @@ ONIONGATE_OUT
 ONIONGATE6_OUT
 ```
 
-These chains are intended to keep OnionGate's firewall rules separate from unrelated system rules.
-
-The implementation uses supported firewall rules for DNS redirection, TCP traffic handling, and restrictions on unsupported outbound traffic.
+These chains are intended to keep OnionGate's rules separate from unrelated
+firewall rules. The backend uses them for DNS redirection, supported TCP
+traffic, and restrictions on unsupported outbound traffic. Inspect the
+backend and your system's firewall configuration before use.
 
 ### Traffic limitations
 
 - Not every UDP application is supported through Tor.
-- Private and local network destinations may bypass Tor.
-- Applications using their own encrypted DNS may not follow system DNS redirection.
+- Private and local destinations may bypass Tor.
+- Applications using their own encrypted DNS may not follow system DNS
+  redirection.
 - Other VPN software or custom routing rules may conflict with OnionGate.
-- A successful Tor connection does not prove that every application is using Tor.
+- A successful Tor connection does not prove every application is using Tor.
 
-Always verify application network behavior rather than assuming that starting OnionGate protects every connection.
+Always verify application network behavior rather than assuming that starting
+OnionGate protects every connection.
 
----
+## Diagnostics and limitations
 
-# 🛡️ Security Considerations
+The GUI runs the existing CLI's `version`, `help`, and `status` commands with
+timeouts and reads the real configuration/status/log paths. The CLI `status`
+command can make a Tor connectivity request when the gateway is active; a
+timeout or unrecognized output is shown as unknown, not as a fabricated
+connection state. The GUI never calls the CLI's `start`, `stop`, or
+`uninstall` commands.
 
-OnionGate is a network configuration tool, not a substitute for good security practices.
+OnionGate does not guarantee complete anonymity or route all protocols
+through Tor. UDP traffic, private/local destinations, applications using
+independent encrypted DNS, VPNs, or other network paths may not be covered.
+Firewall and network configuration changes are performed by the existing
+privileged CLI backend, not by the GUI. Review the backend behavior and
+network risks before use.
+
+## Security Considerations
+
+OnionGate is a network configuration tool, not a substitute for good
+security practices:
 
 - Tor does not make users completely anonymous.
 - Avoid sharing personal information with untrusted services.
@@ -501,81 +326,76 @@ OnionGate is a network configuration tool, not a substitute for good security pr
 - Do not assume every application automatically uses Tor.
 - Keep Tor and your operating system updated.
 - Review firewall and DNS behavior after installation.
-- Test changes in an environment where you can recover network connectivity.
+- Test network changes in an environment where you can recover connectivity.
 
-OnionGate aims to avoid broad firewall flushing and unnecessary changes to system resolver files. However, firewall and routing changes can still interrupt connectivity if configuration is incorrect.
+The CLI makes privileged firewall and network changes when you start the
+gateway. Incorrect configuration or conflicts with other network tools can
+interrupt connectivity. The GUI does not make these changes. Never blindly
+flush the system firewall to troubleshoot OnionGate; that could remove rules
+belonging to other applications.
 
----
+## Troubleshooting
 
-# 🧰 Troubleshooting
+### OnionGate command not found
 
-## OnionGate command not found
-
-```bash
-command -v oniongate
-```
-
-If the command is missing, check the backend installation.
-
-## GUI cannot find the backend
-
-Check:
+Check whether the CLI is on your `PATH`:
 
 ```bash
 command -v oniongate
 ```
 
-The GUI requires the OnionGate CLI to be installed.
+If it is missing, check the backend installation.
 
-## PySide6 module not found
+### GUI cannot find the backend
 
-Activate the virtual environment:
+Check both the CLI and (for an installed GUI) launcher:
+
+```bash
+command -v oniongate
+command -v oniongate-gui
+```
+
+The GUI needs the installed CLI for version, help, and status information.
+
+### PySide6 module not found
+
+For development, activate the virtual environment and install PySide6 into
+that environment:
 
 ```bash
 source .venv/bin/activate
-```
-
-Install PySide6:
-
-```bash
 python -m pip install PySide6
 ```
 
-## pkexec not found
+For the system installation, rerun the installer with `--with-gui`.
 
-Check:
+### GUI does not start
+
+Run it from a terminal to see Python or Qt errors:
 
 ```bash
-command -v pkexec
+oniongate-gui
 ```
 
-Install the PolicyKit package that provides `pkexec` for your distribution.
-
-## GUI does not start
-
-Run:
+Or, from the project checkout:
 
 ```bash
 python gui/oniongate_gui.py
 ```
 
-Check the terminal output for Python or Qt errors.
+### Runtime status is unknown
 
-## Check Tor service
-
-```bash
-systemctl status tor
-```
-
-The service name can differ between distributions.
-
-## Check OnionGate status
+Check the CLI output:
 
 ```bash
 sudo oniongate status
 ```
 
-## Check installed dependencies
+The backend's status command may check Tor connectivity when OnionGate is
+active. If the command times out or returns unexpected output, the GUI
+reports the runtime as unknown rather than assuming a connection state.
+
+### Check installed dependencies
 
 ```bash
 command -v tor
@@ -584,123 +404,65 @@ command -v ip
 command -v iptables
 ```
 
-## Check OnionGate logs
+The GUI Diagnostics page also lists required utilities, distribution details,
+and optional bridge transport binaries.
+
+### Check OnionGate logs
 
 ```bash
 sudo tail -n 50 /etc/oniongate/tor.log
 ```
 
-## Network connectivity problems
+The log may not exist or be readable when OnionGate has not been started.
 
-If network connectivity is interrupted:
+### Network connectivity problems
 
-1. Check OnionGate's status.
-2. Review the log file.
-3. Check whether another VPN or firewall is managing the network.
-4. Stop OnionGate using its normal stop command.
-5. Review the system's firewall configuration before making further changes.
+1. Check OnionGate status and review its log.
+2. Check whether another VPN or firewall is managing network traffic.
+3. Stop OnionGate using its normal CLI command:
 
-Do not blindly flush the system firewall. This may remove rules belonging to other applications.
+   ```bash
+   sudo oniongate stop
+   ```
 
----
+4. Review the system firewall configuration before making other changes.
 
-# 🗑️ Uninstallation
+Do not blindly flush firewall rules; this may remove rules belonging to other
+applications.
 
-To uninstall OnionGate:
+## Uninstallation
+
+Run the installed backend uninstaller:
 
 ```bash
 sudo oniongate uninstall
 ```
 
-The backend uninstaller is intended to remove OnionGate-managed components and its own firewall rules.
+It removes OnionGate application and GUI files but preserves
+`/etc/oniongate/`, including configuration and data. Dependencies such as Tor
+are not removed. Review and remove the preserved directory manually only if
+you explicitly intend to delete that data.
 
-The GUI source and Python virtual environment are separate from the backend. If you want to remove the local GUI environment too:
+## Reporting Issues
 
-```bash
-rm -rf .venv
-```
+If you encounter a problem, [open an issue](https://github.com/usamoo2025/oniongate/issues).
+Include the Linux distribution and version, OnionGate version, whether the
+issue occurs in the CLI or GUI, relevant error output, and steps to reproduce.
 
-Review remaining configuration and backup files before deleting them manually. Avoid removing unrelated system packages or firewall rules.
+Do not include passwords, private keys, personal information, or sensitive
+bridge configuration in issue reports.
 
----
+## Author and Project
 
-# 🗺️ Roadmap
+- **Project:** OnionGate
+- **Maintainer:** Usama Iqbal
+- **GitHub:** [usamoo2025](https://github.com/usamoo2025)
+- **Repository:** [usamoo2025/oniongate](https://github.com/usamoo2025/oniongate)
 
-- [x] Rename TorGate to OnionGate.
-- [x] Introduce Debian-based distribution detection.
-- [x] Introduce Arch-based distribution detection.
-- [x] Add distribution-specific dependency handling.
-- [x] Preserve the original CLI command structure.
-- [x] Retain bridge-mode options.
-- [x] Introduce OnionGate-specific firewall chains.
-- [x] Build a PySide6 desktop interface.
-- [x] Add searchable country selection.
-- [x] Connect GUI country selection to the CLI backend.
-- [x] Add bridge selection to the GUI.
-- [ ] Complete GUI/backend integration testing.
-- [ ] Test installation on clean Debian systems.
-- [ ] Test installation on clean Arch systems.
-- [ ] Test country-based exit-node selection.
-- [ ] Improve automated testing.
-- [ ] Improve recovery and rollback testing.
-- [ ] Expand documentation.
-- [ ] Consider additional distribution support.
+## License and contributions
 
----
+OnionGate is intended to be distributed under the GNU General Public License
+v3.0 (GPL-3.0). See [LICENSE](LICENSE) for the complete license text.
 
-# 🤝 Contributing
-
-Contributions are welcome!
-
-1. Fork the repository.
-2. Create a feature branch.
-3. Make your changes.
-4. Test your changes on a supported Linux distribution.
-5. Submit a pull request.
-
-Please include details about the distribution and version used for testing.
-
-# 🐛 Reporting Issues
-
-If you encounter a problem, open an issue:
-
-[**Report an Issue**](https://github.com/usamoo2025/oniongate/issues)
-
-Please include:
-
-- Linux distribution and version.
-- OnionGate version.
-- Whether the problem occurs in the CLI or GUI.
-- Relevant error messages.
-- Relevant log output.
-- Steps to reproduce the issue.
-
-Do not include passwords, private keys, personal information, or other sensitive configuration data in issue reports.
-
----
-
-# 📜 License
-
-OnionGate is intended to be distributed under the **GNU General Public License v3.0 (GPL-3.0)**.
-
-See the `LICENSE` file in the repository for the complete license text.
-
----
-
-# 👨‍💻 Author and Project
-
-**Project:** OnionGate
-
-**Author / Maintainer:** Usama Iqbal
-
-**GitHub:** [usamoo2025](https://github.com/usamoo2025)
-
-**Repository:** [github.com/usamoo2025/oniongate](https://github.com/usamoo2025/oniongate)
-
----
-
-**ONIONGATE — YOUR NETWORK, YOUR CONTROL.**
-
-*Open-Source Tor Gateway*
-
-Built as an open-source project by Usama Iqbal.
+Contributions and distribution-specific test reports are welcome. Please
+include which distribution and version you used when reporting compatibility.

@@ -947,9 +947,13 @@ cmd_uninstall() {
     
     log_info "Removing OnionGate files..."
     rm -f /usr/local/bin/oniongate
-    rm -rf "$ONIONGATE_DIR"
+    rm -f /usr/local/bin/oniongate-gui
+    rm -f /usr/local/share/applications/oniongate.desktop
+    rm -rf /opt/oniongate/gui /opt/oniongate/venv /opt/oniongate/assets
+    rmdir /opt/oniongate 2>/dev/null || true
     
     log_success "OnionGate has been uninstalled"
+    log_info "Configuration and data were preserved at $ONIONGATE_DIR"
     log_info "Note: Tor, obfs4proxy, and snowflake-client were not removed"
 }
 
@@ -1038,4 +1042,3 @@ main() {
 }
 
 main "$@"
-
