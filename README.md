@@ -81,8 +81,17 @@ Run gateway-changing commands with `sudo`:
 | `sudo oniongate stop` | Stop OnionGate and remove its managed rules |
 | `sudo oniongate restart` | Restart the gateway |
 | `sudo oniongate status` | Show runtime and connection checks |
-| `sudo oniongate diagnostics` | Inspect Tor bootstrap, circuits, DNS, and measured SOCKS download |
+| `sudo oniongate diagnostics` | Inspect Tor bootstrap, circuits, DNS, and measured SOCKS throughput |
+| `sudo oniongate diagnostics --compare-direct` | Additionally compare sequential direct and Tor SOCKS measurements |
 | `sudo oniongate refresh` | Request a new Tor circuit using ControlPort |
+| `sudo oniongate split status` | Show split-tunnel mode and application rules |
+| `sudo oniongate split exclude app [APPLICATION]` | Bypass OnionGate for an app launched using `split run` |
+| `sudo oniongate split include app [APPLICATION]` | Route an app through Tor in include mode |
+| `sudo oniongate split remove app APPLICATION` | Remove an application rule |
+| `sudo oniongate split mode MODE` | Select `exclude` or `include` application-rule policy |
+| `sudo oniongate split enable` / `disable` | Enable or disable split tunneling |
+| `oniongate split apps` | List launchable desktop applications |
+| `oniongate split run APPLICATION [ARGUMENTS...]` | Launch an app inside a managed systemd cgroup scope |
 | `sudo oniongate proxy start` | Start the separate GOST provider-proxy backend |
 | `sudo oniongate proxy stop` | Stop proxy mode and remove only its tagged firewall rules |
 | `sudo oniongate proxy status` | Check proxy process, listeners, and redirection rules |
@@ -126,16 +135,35 @@ sudo oniongate diagnostics
 
 Diagnostics checks the OnionGate Tor process, SOCKS and ControlPort listeners, Tor bootstrap progress, authenticated circuit status, DNSPort resolution when `dig` is available, and recent circuit-building timeout messages in the Tor log. It makes read-only ControlPort queries and does not request or change circuits.
 
-It also performs **one** HTTPS download through SOCKS to estimate request duration and average throughput. The default test is 1 MiB and has a 30-second timeout. The result is a measurement of that request, not guaranteed Tor capacity; network conditions, bridges, exits, and the test endpoint affect it. No repeated or parallel downloads run automatically.
+It performs three sequential HTTPS downloads through SOCKS by default and reports request time, average throughput, median, minimum, maximum, and failures. The default test is 1 MiB per sample with a 20-second timeout. Use `--compare-direct` to add matched sequential direct samples; this sends test requests outside Tor from the Tor service account and exposes the direct public IP to the HTTPS test endpoint. The direct comparison is opt-in. Results are measurements, not guaranteed Tor capacity, and network conditions, bridges, exits, and the endpoint affect them. Samples are never parallel.
 
-You can override the test URL and size with environment variables. The URL must use HTTPS and the requested size must be from 65,536 bytes through 10,485,760 bytes:
+You can override the test URL, size, and sample count with environment variables. The URL must use HTTPS, size must be from 65,536 through 10,485,760 bytes, and sample count must be 1 through 5:
 
 ```bash
 sudo env ONIONGATE_DIAGNOSTICS_URL="https://example.test/download" \
-  ONIONGATE_DIAGNOSTICS_BYTES=2097152 oniongate diagnostics
+  ONIONGATE_DIAGNOSTICS_BYTES=2097152 ONIONGATE_DIAGNOSTICS_SAMPLES=3 \
+  oniongate diagnostics --compare-direct
 ```
 
 Use an HTTPS endpoint that supports byte-range requests for a representative bounded test.
+
+## Application split tunneling
+
+Split tunneling uses cgroup v2 socket matching and the user's systemd manager. It does not match process names or retroactively capture already-running apps. Rules apply only to applications started through `oniongate split run` while OnionGate is active.
+
+```bash
+sudo oniongate split exclude app firefox
+sudo oniongate split enable
+sudo oniongate split apply
+sudo oniongate start
+oniongate split run firefox
+```
+
+In the default `exclude` mode, system TCP and DNS traffic continues through Tor and the selected app is allowed to connect directly while launched in its managed scope. In `include` mode, system traffic remains direct and only explicitly included apps' public TCP and DNS are redirected through Tor. Other public IPv4 protocols and included-app non-loopback IPv6 are blocked rather than sent outside the tunnel. Local/private destinations are exempt from transparent Tor redirection and may remain direct. OnionGate does not carry arbitrary UDP through Tor.
+
+The feature requires a unified cgroup v2 hierarchy, `systemd-run`, `gtk-launch` for desktop IDs, and iptables/ip6tables cgroup v2 `--path` support. If these cannot be verified, setup or launch fails instead of claiming app routing is active. Apps that delegate networking to separate system services, reuse an already-running instance, or escape their user scope may not be covered. Stop OnionGate before editing rules or mode; start it again to apply changes. IP/subnet/port and domain-based split rules are not supported; unsupported rule types are rejected.
+
+`sudo oniongate split apply` validates settings and prerequisites for the next start; it does not replace live firewall rules.
 
 ## High-speed provider proxy mode
 
@@ -245,12 +273,15 @@ If a bridge fails, check that its transport is installed and that valid matching
 Run the mock Tor ControlPort tests from the repository directory:
 
 ```bash
+bash -n ./oniongate
 python3 -m unittest discover -s tests -v
 ```
 
-Tests that require a running Tor daemon, Linux firewall tools, Debian/Arch package managers, or real network paths must be performed on the relevant Linux system. Do not infer Debian or Arch compatibility from tests run on another operating system.
+CLI help and version can be checked without Tor using `./oniongate help` and `./oniongate version`. Tests that require a running Tor daemon, Linux firewall tools, Debian/Arch package managers, or real network paths must be performed on the relevant Linux system. Do not infer Debian or Arch compatibility from tests run on another operating system.
 
 Proxy startup, endpoint authentication and switching, firewall rollback, and real throughput tests additionally require GOST v3, root access to Linux firewall tools, a working provider account, and a network connection.
+
+Application split routing additionally requires Linux cgroup v2, a systemd user manager, and working IPv4/IPv6 cgroup matches. Its live routing and rollback behavior must be verified on Linux; Bash syntax checks alone do not prove kernel or distribution support.
 
 ## Uninstall
 

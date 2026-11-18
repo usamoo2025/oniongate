@@ -34,6 +34,9 @@ TOR_SOCKS_PORT="9050"
 TOR_CONTROL_PORT="9051"
 TOR_CONTROL_COOKIE="$ONIONGATE_DIR/data/control_auth_cookie"
 TOR_NEWNYM_COOLDOWN=10
+SPLIT_CONFIG="$ONIONGATE_DIR/split.json"
+SPLIT_MODE="exclude"
+SPLIT_ENABLED=false
 PROXY_CONFIG="$ONIONGATE_DIR/proxy.conf"
 PROXY_STATE_DIR="$ONIONGATE_DIR/proxy"
 PROXY_GOST_CONFIG="$PROXY_STATE_DIR/gost.yaml"
@@ -394,6 +397,7 @@ spoof_mac_addresses() {
 # ============================================
 disable_ipv6() {
     log_info "Applying OnionGate IPv6 leak protection..."
+    split_load_settings || return 1
     if ip6tables -t filter -S ONIONGATE6_OUT >/dev/null 2>&1; then
         if ! ip6tables -t filter -C ONIONGATE6_OUT \
             -m comment --comment OnionGate-owned -j REJECT >/dev/null 2>&1; then
@@ -418,12 +422,20 @@ disable_ipv6() {
         ip6tables -t filter -A ONIONGATE6_OUT -m owner --uid-owner "$TOR_UID" \
             -m comment --comment OnionGate-managed -j RETURN || return 1
     fi
+    if [[ "$SPLIT_ENABLED" == "true" && "$SPLIT_MODE" == "include" ]]; then
+        ip6tables -t filter -A ONIONGATE6_OUT \
+            -m comment --comment OnionGate-managed -j RETURN || return 1
+    fi
     ip6tables -t filter -A ONIONGATE6_OUT \
         -m comment --comment OnionGate-owned -j REJECT || return 1
     ip6tables -t filter -I OUTPUT 1 \
         -m comment --comment OnionGate-managed -j ONIONGATE6_OUT || return 1
     IP6TABLES_CHAIN_CREATED=false
-    log_success "Unsupported IPv6 output is blocked by OnionGate-owned rules; IPv6 remains enabled"
+    if [[ "$SPLIT_ENABLED" == "true" && "$SPLIT_MODE" == "include" ]]; then
+        log_warning "General IPv6 traffic remains direct; IPv6 is blocked only for included application scopes."
+    else
+        log_success "Unsupported IPv6 output is blocked by OnionGate-owned rules; IPv6 remains enabled"
+    fi
 }
 
 enable_ipv6() {
@@ -473,6 +485,924 @@ configure_dns() {
     log_info "Leaving /etc/resolv.conf and resolver-managed files unchanged"
 }
 
+split_load_settings() {
+    local owner permissions settings
+    SPLIT_ENABLED=false
+    SPLIT_MODE=exclude
+    if [[ ! -e "$SPLIT_CONFIG" ]]; then
+        return 0
+    fi
+    if [[ -L "$SPLIT_CONFIG" || ! -f "$SPLIT_CONFIG" ]]; then
+        log_error "Split-tunneling configuration must be a regular file, not a symbolic link."
+        return 1
+    fi
+    owner=$(stat -c '%u' "$SPLIT_CONFIG" 2>/dev/null) || return 1
+    permissions=$(stat -c '%a' "$SPLIT_CONFIG" 2>/dev/null) || return 1
+    if [[ "$owner" != "0" || ! "$permissions" =~ ^[0-7]{3,4}$ ]] ||
+       (( (8#$permissions & 022) != 0 )); then
+        log_error "Split-tunneling configuration must be root-owned and not group/world writable."
+        return 1
+    fi
+    settings=$(python3 - "$SPLIT_CONFIG" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+try:
+    config = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+    if config.get("version") != 1:
+        raise ValueError("unsupported version")
+    if not isinstance(config.get("enabled"), bool):
+        raise ValueError("enabled must be boolean")
+    if config.get("mode") not in {"exclude", "include"}:
+        raise ValueError("mode must be exclude or include")
+    apps = config.get("apps")
+    if not isinstance(apps, list):
+        raise ValueError("apps must be a list")
+    for app in apps:
+        if not isinstance(app, dict) or app.get("policy") not in {"exclude", "include"}:
+            raise ValueError("invalid application rule")
+        kind = app.get("kind")
+        if kind == "desktop":
+            value = app.get("id")
+            if not isinstance(value, str) or not value or any(c in value for c in "\t\r\n/"):
+                raise ValueError("invalid desktop application ID")
+        elif kind == "path":
+            value = app.get("path")
+            if (not isinstance(value, str) or not value.startswith("/")
+                    or any(c in value for c in "\t\r\n")):
+                raise ValueError("invalid executable path")
+        else:
+            raise ValueError("unknown application rule type")
+    print("true" if config["enabled"] else "false")
+    print(config["mode"])
+except Exception as error:
+    print(f"Invalid split configuration: {error}", file=sys.stderr)
+    raise SystemExit(1)
+PY
+) || {
+        log_error "Could not read split-tunneling configuration."
+        return 1
+    }
+    settings="${settings//$'\r'/}"
+    mapfile -t settings <<< "$settings"
+    [[ ${#settings[@]} -eq 2 ]] || return 1
+    SPLIT_ENABLED="${settings[0]}"
+    SPLIT_MODE="${settings[1]}"
+}
+
+split_config_update() {
+    local action="$1"
+    shift
+    python3 - "$SPLIT_CONFIG" "$action" "$@" <<'PY'
+import json
+import os
+import sys
+import tempfile
+from pathlib import Path
+
+path = Path(sys.argv[1])
+action, *args = sys.argv[2:]
+if path.is_symlink():
+    raise SystemExit("Refusing to update a symbolic-link split configuration.")
+config = {"version": 1, "enabled": False, "mode": "exclude", "apps": []}
+if path.exists():
+    try:
+        config = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as error:
+        raise SystemExit(f"Cannot parse split configuration: {error}")
+if config.get("version") != 1 or not isinstance(config.get("apps"), list):
+    raise SystemExit("Split configuration has an unsupported structure.")
+if action == "set-enabled":
+    config["enabled"] = args[0] == "true"
+elif action == "set-mode":
+    if args[0] not in {"exclude", "include"}:
+        raise SystemExit("Split mode must be include or exclude.")
+    config["mode"] = args[0]
+elif action == "add-app":
+    policy, kind, value = args
+    if policy not in {"exclude", "include"} or kind not in {"desktop", "path"}:
+        raise SystemExit("Invalid application rule.")
+    if kind == "desktop":
+        if not value or any(char in value for char in "\t\r\n/"):
+            raise SystemExit("Invalid desktop application ID.")
+        rule = {"policy": policy, "kind": kind, "id": value}
+        key = ("desktop", value)
+    else:
+        if not value.startswith("/") or any(char in value for char in "\t\r\n"):
+            raise SystemExit("Executable path must be absolute and contain no control separators.")
+        rule = {"policy": policy, "kind": kind, "path": value}
+        key = ("path", value)
+    config["apps"] = [
+        item for item in config["apps"]
+        if (item.get("kind"), item.get("id", item.get("path"))) != key
+    ]
+    config["apps"].append(rule)
+elif action == "remove-app":
+    kind, value = args
+    key = ("desktop", value) if kind == "desktop" else ("path", value)
+    old_size = len(config["apps"])
+    config["apps"] = [
+        item for item in config["apps"]
+        if (item.get("kind"), item.get("id", item.get("path"))) != key
+    ]
+    if len(config["apps"]) == old_size:
+        raise SystemExit("Application rule was not found.")
+elif action == "list-apps":
+    for item in config["apps"]:
+        value = item.get("id", item.get("path", ""))
+        print(f"{item['policy']}\t{item['kind']}\t{value}")
+    raise SystemExit(0)
+else:
+    raise SystemExit("Unknown split configuration operation.")
+path.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+fd, temporary = tempfile.mkstemp(prefix=".split.", dir=path.parent)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as stream:
+        json.dump(config, stream, indent=2, ensure_ascii=True)
+        stream.write("\n")
+    os.chmod(temporary, 0o644)
+    os.replace(temporary, path)
+except Exception:
+    try:
+        os.unlink(temporary)
+    except FileNotFoundError:
+        pass
+    raise
+PY
+}
+
+split_discover_apps() {
+    python3 - <<'PY'
+import configparser
+import os
+from pathlib import Path
+
+roots = [
+    Path.home() / ".local/share/applications",
+    Path.home() / ".local/share/flatpak/exports/share/applications",
+    Path("/var/lib/flatpak/exports/share/applications"),
+    Path("/usr/local/share/applications"),
+    Path("/usr/share/applications"),
+]
+found = {}
+for root in roots:
+    if not root.is_dir():
+        continue
+    for file in sorted(root.rglob("*.desktop")):
+        try:
+            relative = file.relative_to(root).as_posix()
+            app_id = relative.replace("/", "-")
+            parser = configparser.ConfigParser(interpolation=None, strict=False)
+            parser.read(file, encoding="utf-8")
+            entry = parser["Desktop Entry"]
+            if entry.get("Type", "Application") != "Application":
+                continue
+            if entry.getboolean("Hidden", fallback=False) or entry.getboolean("NoDisplay", fallback=False):
+                continue
+            if entry.getboolean("DBusActivatable", fallback=False):
+                continue
+            name = entry.get("Name", app_id).replace("\t", " ").replace("\r", " ").replace("\n", " ")
+            found.setdefault(app_id, (name, str(file)))
+        except (OSError, KeyError, ValueError):
+            continue
+for app_id, (name, file) in sorted(found.items(), key=lambda item: item[1][0].casefold()):
+    print(f"{app_id}\t{name}\t{file}")
+PY
+}
+
+split_resolve_app() {
+    local query="$1"
+    python3 - "$query" <<'PY'
+import configparser
+import os
+import sys
+from pathlib import Path
+
+query = sys.argv[1]
+path = Path(query)
+if path.is_absolute():
+    if path.is_file() and os.access(path, os.X_OK):
+        print(f"path\t{path}\t{path.name}")
+        raise SystemExit(0)
+    raise SystemExit("Executable path must name an existing executable file.")
+roots = [
+    Path.home() / ".local/share/applications",
+    Path.home() / ".local/share/flatpak/exports/share/applications",
+    Path("/var/lib/flatpak/exports/share/applications"),
+    Path("/usr/local/share/applications"),
+    Path("/usr/share/applications"),
+]
+apps = {}
+for root in roots:
+    if not root.is_dir():
+        continue
+    for file in sorted(root.rglob("*.desktop")):
+        try:
+            app_id = file.relative_to(root).as_posix().replace("/", "-")
+            parser = configparser.ConfigParser(interpolation=None, strict=False)
+            parser.read(file, encoding="utf-8")
+            entry = parser["Desktop Entry"]
+            if entry.get("Type", "Application") != "Application":
+                continue
+            if entry.getboolean("Hidden", fallback=False) or entry.getboolean("NoDisplay", fallback=False):
+                continue
+            if entry.getboolean("DBusActivatable", fallback=False):
+                continue
+            apps.setdefault(app_id, (entry.get("Name", app_id), str(file)))
+        except (OSError, KeyError, ValueError):
+            continue
+key = query.casefold()
+matches = [(app_id, name, file) for app_id, (name, file) in apps.items()
+           if app_id.casefold() == key or name.casefold() == key]
+if not matches:
+    matches = [(app_id, name, file) for app_id, (name, file) in apps.items()
+               if key in app_id.casefold() or key in name.casefold()]
+if len(matches) != 1:
+    if matches:
+        for app_id, name, _ in sorted(matches, key=lambda row: row[1].casefold()):
+            print(f"{app_id}\t{name}")
+        raise SystemExit(2)
+    raise SystemExit("No matching desktop application found; supply its desktop ID or absolute executable path.")
+app_id, name, _ = matches[0]
+print(f"desktop\t{app_id}\t{name}")
+PY
+}
+
+split_has_app_policy() {
+    local policy="$1"
+    python3 - "$SPLIT_CONFIG" "$policy" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+try:
+    config = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+except FileNotFoundError:
+    raise SystemExit(1)
+for item in config.get("apps", []):
+    if item.get("policy") == sys.argv[2]:
+        raise SystemExit(0)
+raise SystemExit(1)
+PY
+}
+
+split_get_app_policy() {
+    local kind="$1" value="$2"
+    python3 - "$SPLIT_CONFIG" "$kind" "$value" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+try:
+    config = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+except FileNotFoundError:
+    raise SystemExit("Split configuration has not been created.")
+for item in config.get("apps", []):
+    if item.get("kind") == sys.argv[2] and item.get("id", item.get("path")) == sys.argv[3]:
+        print(item["policy"])
+        raise SystemExit(0)
+raise SystemExit("Application is not in the split-tunneling rules.")
+PY
+}
+
+split_preflight() {
+    local extension_help extension_help_v6
+    [[ -r /sys/fs/cgroup/cgroup.controllers ]] || {
+        log_error "Split applications require a unified cgroup v2 hierarchy."
+        return 1
+    }
+    command -v systemd-run >/dev/null 2>&1 || {
+        log_error "Split applications require systemd-run and a user systemd manager."
+        return 1
+    }
+    command -v sudo >/dev/null 2>&1 || {
+        log_error "Split application launch requires sudo for the limited firewall update."
+        return 1
+    }
+    extension_help=$(iptables -m cgroup --help 2>&1 || true)
+    if ! grep -q -- '--path' <<< "$extension_help"; then
+        log_error "The installed iptables cgroup match does not support cgroup v2 --path."
+        return 1
+    fi
+    extension_help_v6=$(ip6tables -m cgroup --help 2>&1 || true)
+    if ! grep -q -- '--path' <<< "$extension_help_v6"; then
+        log_error "The installed ip6tables cgroup match does not support cgroup v2 --path."
+        return 1
+    fi
+}
+
+split_format_rule() {
+    local policy="$1" kind="$2" value="$3" display="$value"
+    if [[ "$kind" == "desktop" ]]; then
+        display=$(split_discover_apps | awk -F '\t' -v id="$value" '$1 == id { print $2; exit }')
+        [[ -n "$display" ]] || display="$value (not currently installed)"
+    fi
+    printf '  %-8s %s\n' "$policy" "$display"
+}
+
+split_print_apps() {
+    local index=0 app_id name file
+    while IFS=$'\t' read -r app_id name file; do
+        [[ -n "$app_id" ]] || continue
+        index=$((index + 1))
+        printf '%2d. %-30s [%s]\n' "$index" "$name" "$app_id"
+    done < <(split_discover_apps)
+    if (( index == 0 )); then
+        log_warning "No launchable desktop applications were found."
+    fi
+}
+
+split_resolve_selection() {
+    local query="$1" resolved status
+    if [[ -z "$query" ]]; then
+        split_print_apps
+        printf 'Select an application number (or enter an absolute executable path): '
+        read -r query || return 1
+        if [[ "$query" =~ ^[0-9]+$ ]]; then
+            resolved=$(split_discover_apps | awk -F '\t' -v number="$query" \
+                'NR == number { print "desktop\t" $1 "\t" $2; exit }')
+            [[ -n "$resolved" ]] || {
+                log_error "Application selection is out of range."
+                return 1
+            }
+        else
+            resolved=$(split_resolve_app "$query") || {
+                log_error "Could not resolve application: $query"
+                return 1
+            }
+        fi
+    else
+        if [[ "$query" == /* ]]; then
+            resolved=$(split_resolve_app "$query") || {
+                log_error "Could not resolve executable path: $query"
+                return 1
+            }
+        else
+            status=0
+            resolved=$(split_resolve_app "$query") || status=$?
+            if (( status == 2 )); then
+                log_error "Application query is ambiguous; use one of these desktop IDs:"
+                printf '%s\n' "$resolved" | awk -F '\t' '{ printf "  %s (%s)\n", $1, $2 }'
+                return 1
+            elif (( status != 0 )); then
+                log_error "No application matched '$query'. Run 'oniongate split apps' or supply an executable path."
+                return 1
+            fi
+        fi
+    fi
+    printf '%s\n' "$resolved"
+}
+
+split_add_application() {
+    local policy="$1" query="${2:-}" resolved kind value name
+    local -a fields
+    resolved=$(split_resolve_selection "$query") || return 1
+    IFS=$'\t' read -r -a fields <<< "$resolved"
+    kind="${fields[0]}"
+    value="${fields[1]}"
+    name="${fields[2]}"
+    if [[ "$kind" == "path" ]]; then
+        [[ -x "$value" && "$value" == /* && "$value" != *$'\n'* &&
+           "$value" != *$'\r'* && "$value" != *$'\t'* ]] || {
+            log_error "Manual application path must be absolute and executable."
+            return 1
+        }
+    fi
+    split_config_update add-app "$policy" "$kind" "$value" || return 1
+    log_success "$name configured as $([[ "$policy" == "exclude" ]] && echo 'Direct Connection' || echo 'OnionGate')."
+    log_info "The application is routed by cgroup only when launched with 'oniongate split run ${fields[1]}'."
+}
+
+split_remove_application() {
+    local query="$1" resolved kind value
+    if [[ "$query" == /* ]]; then
+        kind=path
+        value="$query"
+    else
+        local status=0
+        resolved=$(split_resolve_app "$query") || status=$?
+        if (( status == 0 )); then
+            IFS=$'\t' read -r kind value _ <<< "$resolved"
+        elif [[ "$query" =~ ^[A-Za-z0-9._-]+$ ]]; then
+            kind=desktop
+            value="$query"
+        else
+            log_error "Could not resolve the application rule to remove."
+            return 1
+        fi
+    fi
+    split_config_update remove-app "$kind" "$value" || {
+        log_error "Could not remove the requested application rule."
+        return 1
+    }
+    log_success "Application split rule removed: $value"
+}
+
+split_validate_cgroup() {
+    local uid="$1" path="$2" token
+    [[ "$uid" =~ ^[0-9]+$ && "$path" != /* && "$path" != *..* ]] || return 1
+    [[ "$path" =~ ^user\.slice/user-${uid}\.slice/user@${uid}\.service/app\.slice/(oniongate-split-[A-Za-z0-9_.-]+\.scope)$ ]] || return 1
+    token="${BASH_REMATCH[1]%.scope}"
+    [[ ${#token} -le 120 ]] || return 1
+    [[ -d "/sys/fs/cgroup/$path" ]] || return 1
+    SPLIT_CGROUP_TOKEN="$token"
+}
+
+split_firewall_add_cgroup() {
+    local policy="$1" path="$2" token="$3" v6_enabled=false
+    local comment="OnionGate-split-$token"
+    local nat_added=false filter_added=false v6_added=false
+    local tcp_added=false dns_added=false
+    local -a v4_nat_args v4_out_args
+    if ! iptables -t nat -S ONIONGATE_NAT >/dev/null 2>&1 ||
+       ! iptables -S ONIONGATE_OUT >/dev/null 2>&1; then
+        log_error "OnionGate IPv4 firewall chains are not active."
+        return 1
+    fi
+    ip6tables -S ONIONGATE6_OUT >/dev/null 2>&1 || {
+        log_error "OnionGate IPv6 firewall chain is not active; refusing split routing that could bypass IPv6 protection."
+        return 1
+    }
+    v6_enabled=true
+    if [[ "$policy" == "exclude" ]]; then
+        v4_nat_args=(-m cgroup --path "$path" -m comment --comment "$comment" -j RETURN)
+        v4_out_args=(-m cgroup --path "$path" -m comment --comment "$comment" -j RETURN)
+        if ! iptables -t nat -C ONIONGATE_NAT "${v4_nat_args[@]}" >/dev/null 2>&1; then
+            iptables -t nat -I ONIONGATE_NAT 1 "${v4_nat_args[@]}" || return 1
+            nat_added=true
+        fi
+        if ! iptables -C ONIONGATE_OUT "${v4_out_args[@]}" >/dev/null 2>&1; then
+            iptables -I ONIONGATE_OUT 1 "${v4_out_args[@]}" || {
+                if [[ "$nat_added" == "true" ]] &&
+                   ! iptables -t nat -D ONIONGATE_NAT "${v4_nat_args[@]}"; then
+                    log_error "Could not roll back the temporary IPv4 NAT exception."
+                fi
+                return 1
+            }
+            filter_added=true
+        fi
+        if [[ "$v6_enabled" == "true" ]] &&
+           ! ip6tables -C ONIONGATE6_OUT -m cgroup --path "$path" \
+               -m comment --comment "$comment" -j RETURN >/dev/null 2>&1; then
+            ip6tables -I ONIONGATE6_OUT 1 -m cgroup --path "$path" \
+                -m comment --comment "$comment" -j RETURN || {
+                if [[ "$filter_added" == "true" ]] &&
+                   ! iptables -D ONIONGATE_OUT "${v4_out_args[@]}"; then
+                    log_error "Could not roll back the temporary IPv4 filter exception."
+                fi
+                if [[ "$nat_added" == "true" ]] &&
+                   ! iptables -t nat -D ONIONGATE_NAT "${v4_nat_args[@]}"; then
+                    log_error "Could not roll back the temporary IPv4 NAT exception."
+                fi
+                return 1
+            }
+        fi
+        return 0
+    fi
+
+    local position=1 rule filter_position=1
+    while IFS= read -r rule; do
+        [[ "$rule" == "-A ONIONGATE_NAT "* ]] || continue
+        [[ "$rule" == *'--comment "OnionGate-owned"'* ||
+           "$rule" == *'--comment OnionGate-owned'* ]] && break
+        position=$((position + 1))
+    done < <(iptables -t nat -S ONIONGATE_NAT)
+    if [[ "$policy" == "include" ]]; then
+        while IFS= read -r rule; do
+            [[ "$rule" == "-A ONIONGATE_OUT "* ]] || continue
+            [[ "$rule" == "-A ONIONGATE_OUT -m comment --comment OnionGate-managed -j RETURN" ||
+               "$rule" == *'--comment "OnionGate-owned"'* ||
+               "$rule" == *'--comment OnionGate-owned'* ]] && break
+            if [[ "$rule" == *"-p tcp"* && "$rule" == *"--dport $TOR_TRANS_PORT"* ]] ||
+               [[ "$rule" == *"-p udp"* && "$rule" == *"--dport $TOR_DNS_PORT"* ]]; then
+                break
+            fi
+            filter_position=$((filter_position + 1))
+        done < <(iptables -S ONIONGATE_OUT)
+    fi
+    if ! iptables -t nat -C ONIONGATE_NAT -m cgroup --path "$path" -p tcp --syn \
+        -m comment --comment "$comment" -j REDIRECT --to-ports "$TOR_TRANS_PORT" >/dev/null 2>&1; then
+        iptables -t nat -I ONIONGATE_NAT "$position" -m cgroup --path "$path" \
+            -p tcp --syn -m comment --comment "$comment" -j REDIRECT \
+            --to-ports "$TOR_TRANS_PORT" || return 1
+        tcp_added=true
+    fi
+    if ! iptables -t nat -C ONIONGATE_NAT -m cgroup --path "$path" -p udp --dport 53 \
+        -m comment --comment "$comment" -j REDIRECT --to-ports "$TOR_DNS_PORT" >/dev/null 2>&1; then
+        iptables -t nat -I ONIONGATE_NAT "$position" -m cgroup --path "$path" \
+            -p udp --dport 53 -m comment --comment "$comment" -j REDIRECT \
+            --to-ports "$TOR_DNS_PORT" || {
+            if [[ "$tcp_added" == "true" ]] &&
+               ! iptables -t nat -D ONIONGATE_NAT -m cgroup --path "$path" \
+                   -p tcp --syn -m comment --comment "$comment" -j REDIRECT \
+                   --to-ports "$TOR_TRANS_PORT"; then
+                log_error "Could not roll back the temporary TCP redirection rule."
+            fi
+            return 1
+        }
+        dns_added=true
+    fi
+    if [[ "$v6_enabled" == "true" ]] &&
+       ! ip6tables -C ONIONGATE6_OUT -m cgroup --path "$path" \
+           -m comment --comment "$comment" -j REJECT >/dev/null 2>&1; then
+        ip6tables -I ONIONGATE6_OUT 2 -m cgroup --path "$path" \
+            -m comment --comment "$comment" -j REJECT || {
+            if [[ "$dns_added" == "true" ]] &&
+               ! iptables -t nat -D ONIONGATE_NAT -m cgroup --path "$path" \
+                   -p udp --dport 53 -m comment --comment "$comment" -j REDIRECT \
+                   --to-ports "$TOR_DNS_PORT"; then
+                log_error "Could not roll back the temporary DNS redirection rule."
+            fi
+            if [[ "$tcp_added" == "true" ]] &&
+               ! iptables -t nat -D ONIONGATE_NAT -m cgroup --path "$path" \
+                   -p tcp --syn -m comment --comment "$comment" -j REDIRECT \
+                   --to-ports "$TOR_TRANS_PORT"; then
+                log_error "Could not roll back the temporary TCP redirection rule."
+            fi
+            return 1
+        }
+        v6_added=true
+    fi
+    if [[ "$policy" == "include" ]] &&
+       ! iptables -C ONIONGATE_OUT -m cgroup --path "$path" ! -p tcp \
+           -m comment --comment "$comment" -j REJECT >/dev/null 2>&1; then
+        iptables -I ONIONGATE_OUT "$filter_position" -m cgroup --path "$path" \
+            ! -p tcp -m comment --comment "$comment" -j REJECT || {
+                if [[ "$v6_added" == "true" ]] &&
+                   ! ip6tables -D ONIONGATE6_OUT -m cgroup --path "$path" \
+                       -m comment --comment "$comment" -j REJECT; then
+                    log_error "Could not roll back the temporary IPv6 block rule."
+                fi
+                if [[ "$dns_added" == "true" ]] &&
+                   ! iptables -t nat -D ONIONGATE_NAT -m cgroup --path "$path" \
+                       -p udp --dport 53 -m comment --comment "$comment" -j REDIRECT \
+                       --to-ports "$TOR_DNS_PORT"; then
+                    log_error "Could not roll back the temporary DNS redirection rule."
+                fi
+                if [[ "$tcp_added" == "true" ]] &&
+                   ! iptables -t nat -D ONIONGATE_NAT -m cgroup --path "$path" \
+                       -p tcp --syn -m comment --comment "$comment" -j REDIRECT \
+                       --to-ports "$TOR_TRANS_PORT"; then
+                    log_error "Could not roll back the temporary TCP redirection rule."
+                fi
+                return 1
+            }
+    fi
+}
+
+split_firewall_remove_cgroup() {
+    local policy="$1" path="$2" token="$3" comment="OnionGate-split-$3"
+    local failed=0
+    if [[ "$policy" == "exclude" ]]; then
+        split_remove_cgroup_rule iptables nat ONIONGATE_NAT -m cgroup --path "$path" \
+            -m comment --comment "$comment" -j RETURN || failed=1
+        split_remove_cgroup_rule iptables filter ONIONGATE_OUT -m cgroup --path "$path" \
+            -m comment --comment "$comment" -j RETURN || failed=1
+        split_remove_cgroup_rule ip6tables filter ONIONGATE6_OUT -m cgroup --path "$path" \
+            -m comment --comment "$comment" -j RETURN || failed=1
+    else
+        split_remove_cgroup_rule iptables filter ONIONGATE_OUT -m cgroup --path "$path" \
+            ! -p tcp -m comment --comment "$comment" -j REJECT || failed=1
+        split_remove_cgroup_rule iptables nat ONIONGATE_NAT -m cgroup --path "$path" \
+            -p udp --dport 53 -m comment --comment "$comment" -j REDIRECT \
+            --to-ports "$TOR_DNS_PORT" || failed=1
+        split_remove_cgroup_rule iptables nat ONIONGATE_NAT -m cgroup --path "$path" \
+            -p tcp --syn -m comment --comment "$comment" -j REDIRECT \
+            --to-ports "$TOR_TRANS_PORT" || failed=1
+        split_remove_cgroup_rule ip6tables filter ONIONGATE6_OUT -m cgroup --path "$path" \
+            -m comment --comment "$comment" -j REJECT || failed=1
+    fi
+    return "$failed"
+}
+
+split_remove_cgroup_rule() {
+    local binary="$1" table="$2" chain="$3"
+    shift 3
+    local -a table_args=()
+    [[ "$table" == "filter" ]] || table_args=(-t "$table")
+    if ! "$binary" "${table_args[@]}" -S "$chain" >/dev/null 2>&1; then
+        return 0
+    fi
+    while "$binary" "${table_args[@]}" -C "$chain" "$@" >/dev/null 2>&1; do
+        if ! "$binary" "${table_args[@]}" -D "$chain" "$@"; then
+            log_error "Could not remove an OnionGate cgroup firewall rule from $chain."
+            return 1
+        fi
+    done
+    return 0
+}
+
+split_admin_scope() {
+    local action="$1" policy="$2" uid="$3" path="$4" kind="$5" value="$6" configured_policy
+    check_root
+    if [[ "$action" != "_activate" && "$action" != "_deactivate" ]]; then
+        log_error "Invalid internal split action."
+        return 2
+    fi
+    if ! split_validate_cgroup "$uid" "$path"; then
+        log_error "Refusing an invalid or non-user-systemd cgroup path."
+        return 1
+    fi
+    if [[ ! "$uid" =~ ^[1-9][0-9]*$ || "${SUDO_UID:-}" != "$uid" ]]; then
+        log_error "Split firewall operations must be requested by the matching unprivileged user."
+        return 1
+    fi
+    if [[ "$action" == "_activate" ]]; then
+        split_load_settings || return 1
+        if [[ "$SPLIT_ENABLED" != "true" || "$SPLIT_MODE" != "$policy" ]]; then
+            log_error "Split policy changed; refusing to apply stale application routing."
+            return 1
+        fi
+        configured_policy=$(split_get_app_policy "$kind" "$value") || return 1
+        if [[ "$configured_policy" != "$policy" ]]; then
+            log_error "Application policy no longer matches the requested cgroup route."
+            return 1
+        fi
+        if ! is_running || ! tor_firewall_is_active; then
+            log_error "OnionGate Tor routing is not active; refusing to launch a split application."
+            return 1
+        fi
+        split_firewall_add_cgroup "$policy" "$path" "$SPLIT_CGROUP_TOKEN"
+    else
+        [[ "$policy" == "include" || "$policy" == "exclude" ]] || return 2
+        split_firewall_remove_cgroup "$policy" "$path" "$SPLIT_CGROUP_TOKEN"
+    fi
+}
+
+split_exec_scoped() {
+    local policy="$1" kind="$2" value="$3"
+    shift 3
+    [[ "${1:-}" == "--" ]] && shift
+    local uid cgroup_path cli_path status=0 child_pid=""
+    local -a app_command
+    if [[ "$EUID" -eq 0 ]]; then
+        log_error "Do not launch split applications as root; run 'oniongate split run ...' as your desktop user."
+        return 1
+    fi
+    split_load_settings || return 1
+    if [[ "$SPLIT_ENABLED" != "true" || "$SPLIT_MODE" != "$policy" ]]; then
+        log_error "Split routing is disabled or its mode does not match this application."
+        return 1
+    fi
+    if [[ "$policy" == "exclude" && "$SPLIT_MODE" != "exclude" ]] ||
+       [[ "$policy" == "include" && "$SPLIT_MODE" != "include" ]]; then
+        log_error "Application rule does not match the active split mode."
+        return 1
+    fi
+    if [[ "$(split_get_app_policy "$kind" "$value")" != "$policy" ]]; then
+        log_error "Application rule changed before launch; refusing to run it."
+        return 1
+    fi
+    uid=$(id -u)
+    cgroup_path=$(awk -F: '$1 == "0" { sub("^/", "", $3); print $3; exit }' /proc/self/cgroup)
+    if [[ -z "$cgroup_path" ]]; then
+        log_error "Could not identify the unified cgroup v2 path for this application scope."
+        return 1
+    fi
+    if ! split_validate_cgroup "$uid" "$cgroup_path"; then
+        log_error "The current process is not inside the expected OnionGate systemd application scope."
+        return 1
+    fi
+    cli_path=$(readlink -f -- "${BASH_SOURCE[0]}") || return 1
+    if [[ "$kind" == "desktop" ]]; then
+        command -v gtk-launch >/dev/null 2>&1 || {
+            log_error "gtk-launch is required to start desktop entries; alternatively add an absolute executable path."
+            return 1
+        }
+        app_command=(gtk-launch "$value")
+    else
+        [[ -x "$value" ]] || {
+            log_error "Configured executable is no longer available: $value"
+            return 1
+        }
+        app_command=("$value")
+    fi
+    split_release_scope() {
+        if ! sudo "$cli_path" split _deactivate "$policy" "$uid" "$cgroup_path" "$kind" "$value"; then
+            log_warning "Could not remove the temporary cgroup firewall exception; it cannot match future scopes."
+            return 1
+        fi
+    }
+    split_scope_has_children() {
+        local scoped_pid
+        while IFS= read -r scoped_pid; do
+            if [[ "$scoped_pid" =~ ^[0-9]+$ &&
+                  "$scoped_pid" != "$$" && "$scoped_pid" != "$BASHPID" ]]; then
+                return 0
+            fi
+        done < "/sys/fs/cgroup/$cgroup_path/cgroup.procs"
+        return 1
+    }
+    split_terminate_scope_children() {
+        local scoped_pid
+        while IFS= read -r scoped_pid; do
+            [[ "$scoped_pid" =~ ^[0-9]+$ && "$scoped_pid" != "$$" ]] || continue
+            kill -TERM "$scoped_pid" 2>/dev/null || true
+        done < "/sys/fs/cgroup/$cgroup_path/cgroup.procs"
+    }
+    trap split_release_scope EXIT
+    trap split_terminate_scope_children INT TERM
+    if ! sudo "$cli_path" split _activate "$policy" "$uid" "$cgroup_path" "$kind" "$value"; then
+        split_release_scope || status=1
+        trap - EXIT INT TERM
+        return 1
+    fi
+    "${app_command[@]}" "$@" &
+    child_pid=$!
+    wait "$child_pid" || status=$?
+    if [[ "$kind" == "desktop" ]] && ! split_scope_has_children; then
+        log_error "The desktop launcher left no application process in the managed scope; it may have reused or delegated to an existing process."
+        status=1
+    fi
+    if split_scope_has_children; then
+        log_info "Waiting for processes in this application scope to exit; Ctrl-C terminates scoped processes."
+        while split_scope_has_children; do sleep 1; done
+    fi
+    trap - INT TERM
+    split_release_scope || status=1
+    trap - EXIT
+    return "$status"
+}
+
+split_run_app() {
+    local query="$1" resolved kind value policy cli_path uid unit
+    local -a fields
+    shift
+    resolved=$(split_resolve_selection "$query") || return 1
+    IFS=$'\t' read -r -a fields <<< "$resolved"
+    kind="${fields[0]}"
+    value="${fields[1]}"
+    if [[ "$EUID" -eq 0 ]]; then
+        log_error "Run split applications as your regular desktop user, without sudo."
+        return 1
+    fi
+    split_load_settings || return 1
+    if [[ "$SPLIT_ENABLED" != "true" ]]; then
+        log_error "Split tunneling is disabled. Enable it with 'sudo oniongate split enable'."
+        return 1
+    fi
+    policy=$(split_get_app_policy "$kind" "$value") || return 1
+    if [[ "$SPLIT_MODE" != "$policy" ]]; then
+        log_error "The application rule uses '$policy' policy, but split mode is '$SPLIT_MODE'."
+        return 1
+    fi
+    split_preflight || return 1
+    cli_path=$(readlink -f -- "${BASH_SOURCE[0]}") || return 1
+    uid=$(id -u)
+    unit="oniongate-split-${uid}-$$-${RANDOM}.scope"
+    systemd-run --user --scope --wait --quiet --unit="$unit" -- \
+        "$cli_path" split _exec "$policy" "$kind" "$value" -- "$@"
+}
+
+cmd_split() {
+    local action="${1:-}"
+    shift || true
+    case "$action" in
+        ""|status)
+            split_load_settings || return 1
+            echo "OnionGate split tunneling"
+            echo "Enabled: $SPLIT_ENABLED"
+            echo "Mode: $SPLIT_MODE"
+            if [[ "$EUID" -eq 0 ]]; then
+                if is_running && tor_firewall_is_active; then
+                    echo "Tor firewall: active"
+                else
+                    echo "Tor firewall: inactive"
+                fi
+            else
+                echo "Tor firewall: use 'sudo oniongate split status' to inspect live state."
+            fi
+            if [[ "$SPLIT_ENABLED" == "true" ]]; then
+                if [[ "$SPLIT_MODE" == "exclude" ]]; then
+                    echo "Default public TCP/DNS: through OnionGate; other public UDP is blocked."
+                    echo "Excluded apps are direct only via 'oniongate split run'; local/private destinations may remain direct."
+                else
+                    echo "Default traffic: direct; included apps' public TCP/DNS use Tor only via 'oniongate split run'."
+                    echo "Other public IPv4 protocols and included-app non-loopback IPv6 are blocked."
+                    echo "Local/private destinations may remain direct."
+                fi
+            fi
+            echo "Configured applications:"
+            local policy kind value count=0
+            while IFS=$'\t' read -r policy kind value; do
+                [[ -n "$policy" ]] || continue
+                count=$((count + 1))
+                split_format_rule "$policy" "$kind" "$value"
+            done < <(split_config_update list-apps)
+            (( count > 0 )) || echo "  (none)"
+            echo "Application routes are active only inside scopes created by 'oniongate split run'."
+            ;;
+        apps)
+            split_print_apps
+            ;;
+        rules)
+            split_config_update list-apps
+            ;;
+        exclude|include)
+            local operation="${1:-}"
+            [[ -n "$operation" ]] || {
+                log_error "Usage: oniongate split $action app [APPLICATION]"
+                return 2
+            }
+            shift
+            if [[ "$operation" != "app" ]]; then
+                log_error "Only application split rules are currently supported."
+                return 2
+            fi
+            if [[ $# -gt 1 ]]; then
+                log_error "Specify one desktop application or executable path at a time."
+                return 2
+            fi
+            check_root
+            split_load_settings || return 1
+            if is_running || tor_firewall_is_active; then
+                log_error "Stop OnionGate before changing persistent split rules; restart to apply the selected mode."
+                return 1
+            fi
+            split_add_application "$action" "${1:-}"
+            ;;
+        remove)
+            [[ "${1:-}" == "app" && -n "${2:-}" ]] || {
+                log_error "Usage: oniongate split remove app APPLICATION"
+                return 2
+            }
+            check_root
+            split_load_settings || return 1
+            { is_running || tor_firewall_is_active; } && {
+                log_error "Stop OnionGate before changing persistent split rules."
+                return 1
+            }
+            split_remove_application "$2"
+            ;;
+        enable|disable)
+            check_root
+            split_load_settings || return 1
+            if is_running || tor_firewall_is_active; then
+                log_error "Stop OnionGate before changing split mode; start it again to apply the change."
+                return 1
+            fi
+            split_config_update set-enabled "$([[ "$action" == "enable" ]] && echo true || echo false)" || return 1
+            log_success "Split tunneling $([[ "$action" == "enable" ]] && echo enabled || echo disabled); it takes effect when OnionGate starts."
+            ;;
+        mode)
+            local mode="${1:-}"
+            [[ "$mode" == "include" || "$mode" == "exclude" ]] || {
+                log_error "Usage: oniongate split mode {include|exclude}"
+                return 2
+            }
+            check_root
+            split_load_settings || return 1
+            if is_running || tor_firewall_is_active; then
+                log_error "Stop OnionGate before changing split mode; start it again to apply the change."
+                return 1
+            fi
+            if [[ "$mode" == "include" ]] && ! split_has_app_policy include; then
+                log_error "Add at least one included application before selecting include mode."
+                return 1
+            fi
+            split_config_update set-mode "$mode" || return 1
+            log_success "Split mode set to $mode; enable split tunneling and start OnionGate to apply it."
+            ;;
+        apply)
+            check_root
+            split_load_settings || return 1
+            if is_running || tor_firewall_is_active; then
+                log_error "Live policy replacement is not atomic across the existing IPv4/IPv6 firewall chains. Stop and start OnionGate to apply split settings safely."
+                return 1
+            fi
+            split_load_settings || return 1
+            if [[ "$SPLIT_ENABLED" == "true" ]]; then
+                split_preflight || return 1
+                if [[ "$SPLIT_MODE" == "include" ]] && ! split_has_app_policy include; then
+                    log_error "Include mode requires at least one included application."
+                    return 1
+                fi
+            fi
+            log_success "Split settings validated. They will be applied when OnionGate is started."
+            ;;
+        run)
+            [[ -n "${1:-}" ]] || {
+                log_error "Usage: oniongate split run APPLICATION [ARGUMENTS...]"
+                return 2
+            }
+            split_run_app "$@"
+            ;;
+        _exec)
+            [[ $# -ge 3 ]] || return 2
+            split_exec_scoped "$@"
+            ;;
+        _activate|_deactivate)
+            [[ $# -eq 5 ]] || return 2
+            split_admin_scope "$action" "$@"
+            ;;
+        *)
+            log_error "Usage: oniongate split {status|enable|disable|mode|apps|rules|exclude app|include app|remove app|run|apply}"
+            return 2
+            ;;
+    esac
+}
+
 # ============================================
 # iptables Configuration
 # ============================================
@@ -510,7 +1440,9 @@ remove_owned_chain() {
                 if [[ "$rule" == *'--comment "OnionGate-managed"'* ||
                       "$rule" == *'--comment OnionGate-managed'* ||
                       "$rule" == *'--comment "OnionGate-owned"'* ||
-                      "$rule" == *'--comment OnionGate-owned'* ]]; then
+                      "$rule" == *'--comment OnionGate-owned'* ||
+                      "$rule" == *'--comment "OnionGate-split-'* ||
+                      "$rule" == *'--comment OnionGate-split-'* ]]; then
                     rule_args="${rule#-A "$chain" }"
                     rule_args="${rule_args//\"/}"
                     arguments=()
@@ -530,6 +1462,7 @@ remove_owned_chain() {
 
 configure_iptables() {
     log_info "Configuring OnionGate-owned transparent proxy rules..."
+    split_load_settings || return 1
     remove_oniongate_firewall || return 1
     iptables -t nat -N ONIONGATE_NAT || return 1
     IPTABLES_NAT_CHAIN_CREATED=true
@@ -544,10 +1477,12 @@ configure_iptables() {
     done
     iptables -t nat -A ONIONGATE_NAT -m owner --uid-owner "$TOR_UID" \
         -m comment --comment OnionGate-managed -j RETURN || return 1
-    iptables -t nat -A ONIONGATE_NAT -p udp --dport 53 \
-        -m comment --comment OnionGate-managed -j REDIRECT --to-ports "$TOR_DNS_PORT" || return 1
-    iptables -t nat -A ONIONGATE_NAT -p tcp --syn \
-        -m comment --comment OnionGate-managed -j REDIRECT --to-ports "$TOR_TRANS_PORT" || return 1
+    if [[ "$SPLIT_ENABLED" != "true" || "$SPLIT_MODE" != "include" ]]; then
+        iptables -t nat -A ONIONGATE_NAT -p udp --dport 53 \
+            -m comment --comment OnionGate-managed -j REDIRECT --to-ports "$TOR_DNS_PORT" || return 1
+        iptables -t nat -A ONIONGATE_NAT -p tcp --syn \
+            -m comment --comment OnionGate-managed -j REDIRECT --to-ports "$TOR_TRANS_PORT" || return 1
+    fi
     iptables -t nat -A ONIONGATE_NAT \
         -m comment --comment OnionGate-owned -j RETURN || return 1
     iptables -t nat -I OUTPUT 1 \
@@ -569,6 +1504,10 @@ configure_iptables() {
         -m comment --comment OnionGate-managed -j RETURN || return 1
     iptables -A ONIONGATE_OUT -p udp --dport "$TOR_DNS_PORT" \
         -m comment --comment OnionGate-managed -j RETURN || return 1
+    if [[ "$SPLIT_ENABLED" == "true" && "$SPLIT_MODE" == "include" ]]; then
+        iptables -A ONIONGATE_OUT \
+            -m comment --comment OnionGate-managed -j RETURN || return 1
+    fi
     iptables -A ONIONGATE_OUT \
         -m comment --comment OnionGate-owned -j REJECT || return 1
     iptables -I OUTPUT 1 \
@@ -869,6 +1808,7 @@ verify_transparent_tcp() {
 verify_gateway_connectivity() {
     local failed=0
     local bootstrap_log_unavailable=false
+    split_load_settings || return 1
     if [[ -r "$TOR_LOG" ]]; then
         if grep -q 'Bootstrapped 100%' "$TOR_LOG"; then
             log_success "Tor bootstrap: 100% (verified from Tor log)"
@@ -887,7 +1827,11 @@ verify_gateway_connectivity() {
         failed=1
     fi
     verify_tor_dns || failed=1
-    verify_transparent_tcp || failed=1
+    if [[ "$SPLIT_ENABLED" == "true" && "$SPLIT_MODE" == "include" ]]; then
+        log_warning "Global transparent-TCP verification skipped: include mode routes only applications launched through OnionGate."
+    else
+        verify_transparent_tcp || failed=1
+    fi
     [[ "$failed" == "0" ]]
 }
 
@@ -930,7 +1874,11 @@ start_tor() {
             attempts=$((attempts + 1))
             if verify_gateway_connectivity; then
                 stop_log_display
-                log_success "Tor bootstrap, SOCKS, DNSPort, and transparent TCP checks succeeded"
+                if [[ "$SPLIT_ENABLED" == "true" && "$SPLIT_MODE" == "include" ]]; then
+                    log_success "Tor bootstrap, SOCKS, and DNSPort checks succeeded."
+                else
+                    log_success "Tor bootstrap, SOCKS, DNSPort, and transparent TCP checks succeeded"
+                fi
                 local tor_ip
                 tor_ip=$(sed -n 's/.*"IP"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' <<< "$SOCKS_CHECK_RESULT")
                 [[ -n "$tor_ip" ]] && log_success "Tor exit IP: $tor_ip"
@@ -1084,6 +2032,16 @@ cmd_start() {
         log_error "Tor user not found. Please ensure Tor is properly installed."
         exit 1
     fi
+
+    split_load_settings || exit 1
+    if [[ "$SPLIT_ENABLED" == "true" ]]; then
+        split_preflight || exit 1
+        if [[ "$SPLIT_MODE" == "include" ]] && ! split_has_app_policy include; then
+            log_error "Include mode requires at least one included application."
+            log_info "Add one with 'sudo oniongate split include app' before starting."
+            exit 1
+        fi
+    fi
     
     log_info "Starting OnionGate..."
     echo ""
@@ -1166,8 +2124,14 @@ cmd_start() {
     
     log_success "============================================"
     log_success "OnionGate is now active"
-    log_success "SOCKS, DNSPort, and transparent TCP checks passed through Tor"
-    log_warning "Other UDP traffic and local/private destinations are not routed through Tor."
+    if [[ "$SPLIT_ENABLED" == "true" && "$SPLIT_MODE" == "include" ]]; then
+        log_success "Tor bootstrap, SOCKS, and DNSPort checks passed."
+        log_warning "Include mode: system traffic outside 'oniongate split run' remains direct."
+        log_warning "Included apps use Tor for public TCP and DNS; other public IPv4 protocols and non-loopback IPv6 are blocked."
+    else
+        log_success "SOCKS, DNSPort, and transparent TCP checks passed through Tor"
+        log_warning "Other UDP traffic and local/private destinations are not routed through Tor."
+    fi
     log_success "============================================"
     echo ""
     log_info "To stop OnionGate, run: sudo oniongate stop"
@@ -1348,10 +2312,60 @@ diagnostics_check_listener() {
     return 1
 }
 
-diagnostics_measure_socks() (
+diagnostics_download_sample() {
+    local route="$1" bytes="$2" url="$3" metrics
+    if [[ "$route" == "direct" ]]; then
+        metrics=$(runuser -u "$TOR_USER" -- curl --silent --fail --location --max-redirs 3 \
+            --proto '=https' --proto-redir '=https' --ipv4 --noproxy '*' \
+            --connect-timeout 10 --max-time 20 --max-filesize "$bytes" \
+            --range "0-$((bytes - 1))" --output /dev/null \
+            --write-out $'%{time_total}\t%{size_download}' "$url" 2>/dev/null) || return 1
+    else
+        metrics=$(curl --silent --fail --location --max-redirs 3 \
+            --proto '=https' --proto-redir '=https' --ipv4 \
+            --connect-timeout 10 --max-time 20 --max-filesize "$bytes" \
+            --range "0-$((bytes - 1))" --socks5-hostname "127.0.0.1:$TOR_SOCKS_PORT" \
+            --output /dev/null --write-out $'%{time_total}\t%{size_download}' \
+            "$url" 2>/dev/null) || return 1
+    fi
+    printf '%s\n' "$metrics"
+}
+
+diagnostics_summarize_samples() {
+    local label="$1" attempts="$2"
+    shift 2
+    local -a rates=("$@") sorted=()
+    local successes="${#rates[@]}" failures=$((attempts - ${#rates[@]}))
+    local sum average minimum maximum median median_index
+    if (( successes == 0 )); then
+        log_error "$label: no successful samples ($failures/$attempts failed)."
+        return 1
+    fi
+    mapfile -t sorted < <(printf '%s\n' "${rates[@]}" | sort -n)
+    sum=$(printf '%s\n' "${rates[@]}" | awk '{ total += $1 } END { printf "%.6f", total }')
+    average=$(awk -v sum="$sum" -v count="$successes" 'BEGIN { printf "%.3f", sum / count }')
+    minimum="${sorted[0]}"
+    maximum="${sorted[$((successes - 1))]}"
+    median_index=$((successes / 2))
+    if (( successes % 2 )); then
+        median="${sorted[$median_index]}"
+    else
+        median=$(awk -v a="${sorted[$((median_index - 1))]}" -v b="${sorted[$median_index]}" \
+            'BEGIN { printf "%.3f", (a + b) / 2 }')
+    fi
+    printf '%s statistics (MiB/s): average=%s median=%s min=%s max=%s; failures=%s/%s\n' \
+        "$label" "$average" "$median" "$minimum" "$maximum" "$failures" "$attempts"
+    DIAGNOSTICS_AVERAGE="$average"
+}
+
+diagnostics_measure_socks() {
+    local compare_direct="${1:-false}"
     local bytes="${ONIONGATE_DIAGNOSTICS_BYTES:-1048576}"
     local url="${ONIONGATE_DIAGNOSTICS_URL:-https://speed.cloudflare.com/__down?bytes=$bytes}"
-    local temporary_file metrics duration downloaded throughput mib_per_second
+    local samples="${ONIONGATE_DIAGNOSTICS_SAMPLES:-3}"
+    local route attempt metrics duration downloaded rate mib_per_second failed=0
+    local direct_average="" socks_average="" comparison
+    local -a direct_rates=() socks_rates=()
     if [[ "$url" != https://* ]]; then
         log_error "Download test URL must use HTTPS."
         return 1
@@ -1365,52 +2379,100 @@ diagnostics_measure_socks() (
         log_error "ONIONGATE_DIAGNOSTICS_BYTES must be between 65536 and 10485760."
         return 1
     fi
+    if [[ ! "$samples" =~ ^[1-5]$ ]]; then
+        log_error "ONIONGATE_DIAGNOSTICS_SAMPLES must be between 1 and 5."
+        return 1
+    fi
     if ! command -v curl >/dev/null 2>&1; then
-        log_error "Cannot measure SOCKS throughput: curl is unavailable."
+        log_error "Cannot measure download throughput: curl is unavailable."
         return 1
     fi
-    temporary_file=$(mktemp "${TMPDIR:-/tmp}/oniongate-diagnostics.XXXXXX") || {
-        log_error "Could not create a private temporary file for the download test."
-        return 1
-    }
-    chmod 600 "$temporary_file" || {
-        rm -f -- "$temporary_file"
-        log_error "Could not secure the temporary download file."
-        return 1
-    }
-    trap 'rm -f -- "$temporary_file"' EXIT
+    if [[ "$compare_direct" == "true" ]]; then
+        if ! detect_tor_user; then
+            log_error "Cannot run a direct comparison because the Tor service account was not detected."
+            return 1
+        fi
+        if [[ "$EUID" -ne 0 ]]; then
+            log_error "Direct-versus-Tor comparison requires root so the baseline can run as Tor's firewall-exempt service account."
+            return 1
+        fi
+    fi
 
-    log_info "Measuring one $bytes-byte SOCKS download (maximum 30 seconds)..."
-    if ! metrics=$(curl --silent --fail --location --max-redirs 3 \
-        --proto '=https' --proto-redir '=https' \
-        --connect-timeout 10 --max-time 30 --max-filesize "$bytes" \
-        --range "0-$((bytes - 1))" --socks5-hostname "127.0.0.1:$TOR_SOCKS_PORT" \
-        --output "$temporary_file" --write-out $'%{time_total}\t%{size_download}\t%{speed_download}' \
-        "$url" 2>/dev/null); then
-        log_error "SOCKS download measurement failed; check the SOCKS route and configured HTTPS endpoint."
-        return 1
+    if [[ "$compare_direct" == "true" ]]; then
+        log_info "Running $samples sequential direct/SOCKS sample pair(s), up to 20 seconds per download."
+        log_warning "Direct baseline requests run outside Tor as the Tor service account and expose its public IP to the HTTPS test endpoint."
+    else
+        log_info "Running $samples sequential SOCKS samples, up to 20 seconds per download."
     fi
-    IFS=$'\t' read -r duration downloaded throughput <<< "$metrics"
-    if [[ ! "$downloaded" =~ ^[0-9]+([.][0-9]+)?$ ||
-          ! "$duration" =~ ^[0-9]+([.][0-9]+)?$ ||
-          ! "$throughput" =~ ^[0-9]+([.][0-9]+)?$ ]] ||
-       ! awk -v size="$downloaded" 'BEGIN { exit !(size > 0) }'; then
-        log_error "SOCKS download completed without valid timing and throughput metrics."
-        return 1
+    for ((attempt = 1; attempt <= samples; attempt++)); do
+        local -a routes=(socks)
+        [[ "$compare_direct" != "true" ]] || routes=(direct socks)
+        for route in "${routes[@]}"; do
+            if metrics=$(diagnostics_download_sample "$route" "$bytes" "$url"); then
+                IFS=$'\t' read -r duration downloaded <<< "$metrics"
+                if [[ "$downloaded" =~ ^[0-9]+([.][0-9]+)?$ &&
+                      "$duration" =~ ^[0-9]+([.][0-9]+)?$ ]] &&
+                   awk -v size="$downloaded" -v seconds="$duration" \
+                       'BEGIN { exit !(size > 0 && seconds > 0) }'; then
+                    rate=$(awk -v size="$downloaded" -v seconds="$duration" \
+                        'BEGIN { printf "%.6f", size / seconds / 1048576 }')
+                    mib_per_second=$(awk -v value="$rate" 'BEGIN { printf "%.3f", value }')
+                    printf '%s sample %s/%s: %s MiB/s (%s bytes in %s seconds)\n' \
+                        "$route" "$attempt" "$samples" "$mib_per_second" "$downloaded" "$duration"
+                    if [[ "$route" == "direct" ]]; then
+                        direct_rates+=("$rate")
+                    else
+                        socks_rates+=("$rate")
+                    fi
+                else
+                    log_warning "$route sample $attempt returned invalid timing or byte-count metrics."
+                    failed=$((failed + 1))
+                fi
+            else
+                log_warning "$route sample $attempt failed or exceeded its timeout."
+                failed=$((failed + 1))
+            fi
+        done
+    done
+    if [[ "$compare_direct" == "true" ]]; then
+        if diagnostics_summarize_samples "Direct" "$samples" "${direct_rates[@]}"; then
+            direct_average="$DIAGNOSTICS_AVERAGE"
+        else
+            failed=$((failed + 1))
+        fi
     fi
-    mib_per_second=$(awk -v size="$downloaded" -v seconds="$duration" \
-        'BEGIN { if (seconds > 0) printf "%.3f", size / seconds / 1048576; else print "unavailable" }')
-    log_success "Measured SOCKS download: ${downloaded} bytes in ${duration} seconds."
-    log_info "Average throughput: ${mib_per_second} MiB/s (${throughput} bytes/s)."
-    log_warning "This single download is a measurement, not guaranteed Tor capacity."
-)
+    if diagnostics_summarize_samples "Tor SOCKS" "$samples" "${socks_rates[@]}"; then
+        socks_average="$DIAGNOSTICS_AVERAGE"
+    else
+        failed=$((failed + 1))
+    fi
+    if [[ -n "$direct_average" && -n "$socks_average" ]]; then
+        comparison=$(awk -v direct="$direct_average" -v tor="$socks_average" \
+            'BEGIN { if (direct > 0) printf "%+.1f%%", (tor - direct) / direct * 100; else print "unavailable" }')
+        log_info "Tor SOCKS average versus direct baseline: $comparison."
+    elif [[ "$compare_direct" == "true" ]]; then
+        log_warning "Direct-versus-Tor comparison unavailable because one route had no successful samples."
+    fi
+    log_warning "Sequential measurements use one HTTPS endpoint and requested size; results vary with time and are not guaranteed Tor capacity."
+    (( failed == 0 ))
+}
 
 cmd_diagnostics() {
     show_banner
-    local failed=0 control_output bootstrap_seen=false circuit_count=0
+    local compare_direct=false argument
+    for argument in "$@"; do
+        if [[ "$argument" == "--compare-direct" ]]; then
+            compare_direct=true
+        else
+            log_error "Usage: oniongate diagnostics [--compare-direct]"
+            return 2
+        fi
+    done
+    local failed=0 control_output bootstrap_seen=false circuit_count=0 tor_running=false
     local record first second third socks_listener=false
 
     if is_running; then
+        tor_running=true
         log_success "OnionGate-managed Tor process is running (PID $(<"$ONIONGATE_DIR/tor.pid"))."
     else
         log_error "OnionGate-managed Tor process is not running."
@@ -1483,14 +2545,14 @@ cmd_diagnostics() {
         log_warning "DNS test skipped: dig is unavailable."
     fi
 
-    if [[ "$socks_listener" == "true" ]]; then
-        if diagnostics_measure_socks; then
+    if [[ "$socks_listener" == "true" && "$tor_running" == "true" ]]; then
+        if diagnostics_measure_socks "$compare_direct"; then
             :
         else
             failed=1
         fi
     else
-        log_warning "SOCKS download measurement skipped because the SOCKS listener is unavailable."
+        log_warning "Download measurement skipped because OnionGate's Tor process and SOCKS listener were not both verified."
     fi
 
     if [[ -r "$TOR_LOG" ]]; then
@@ -1523,7 +2585,12 @@ cmd_status() {
         echo ""
         if verify_gateway_connectivity; then
             local tor_ip
-            log_success "Tor Connection: OK"
+            if [[ "$SPLIT_ENABLED" == "true" && "$SPLIT_MODE" == "include" ]]; then
+                log_success "Tor bootstrap, SOCKS, and DNSPort: OK"
+                log_warning "Include mode leaves system traffic outside managed application scopes direct."
+            else
+                log_success "Tor Connection: OK"
+            fi
             tor_ip=$(sed -n 's/.*"IP"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' <<< "$SOCKS_CHECK_RESULT")
             [[ -z "$tor_ip" ]] || log_success "Tor Exit IP: $tor_ip"
         else
@@ -2665,6 +3732,7 @@ COMMANDS:
     status          Show OnionGate status
     diagnostics     Show Tor process, bootstrap, circuits, and speed measurements
     refresh         Request a new Tor circuit (exit IP may remain unchanged)
+    split           Configure cgroup-scoped application split tunneling
     proxy           Manage the independent GOST high-speed proxy backend
     version         Show version information
     help            Show instructions
@@ -2690,9 +3758,33 @@ EXAMPLES:
     sudo oniongate proxy start
     sudo oniongate proxy diagnostics
 
-Diagnostics performs one bounded SOCKS download. Defaults: 1 MiB and 30 seconds.
-Override with ONIONGATE_DIAGNOSTICS_URL (HTTPS only) and
-ONIONGATE_DIAGNOSTICS_BYTES (65536 through 10485760).
+Diagnostics performs bounded sequential SOCKS downloads by default.
+Use --compare-direct to send a direct baseline outside Tor. Defaults: 1 MiB
+and three samples; configure with:
+ONIONGATE_DIAGNOSTICS_URL (HTTPS only),
+ONIONGATE_DIAGNOSTICS_BYTES (65536 through 10485760) and
+ONIONGATE_DIAGNOSTICS_SAMPLES (1 through 5).
+
+SPLIT TUNNELING:
+    oniongate split status
+    sudo oniongate split exclude app [APPLICATION]
+    sudo oniongate split include app [APPLICATION]
+    sudo oniongate split remove app APPLICATION
+    sudo oniongate split mode {exclude|include}
+    sudo oniongate split enable
+    sudo oniongate split disable
+    oniongate split apps
+    oniongate split run APPLICATION [ARGUMENTS...]
+    sudo oniongate split apply
+
+Split tunneling requires cgroup v2, systemd user scopes, and iptables cgroup
+matching. Applications must be launched with "oniongate split run"; existing
+processes and ordinary launches are not covered. Include mode leaves other
+system traffic direct. Tor carries TCP and DNS for selected apps; unsupported
+public non-TCP traffic and included-app IPv6 traffic are blocked. Local/private destinations
+may remain direct. Apps that delegate networking to separate system services may
+not be covered. Split rules are inactive unless explicitly enabled.
+"split apply" validates prerequisites; changes take effect on the next start.
 
 NOTE:
     A new circuit does not guarantee a different public exit IP.
@@ -2723,13 +3815,23 @@ EOF
         echo ""
         echo "ADDITIONAL COMMAND:"
         echo "    oniongate diagnostics"
-        echo "        Read Tor bootstrap and circuits, test DNS, and perform one bounded SOCKS download."
+        echo "        Read Tor bootstrap/circuits, test DNS, and measure bounded SOCKS downloads."
+        echo "        Add --compare-direct to send a baseline outside Tor to the test endpoint."
         echo "    oniongate proxy {start|stop|reconnect|status|refresh|diagnostics}"
         echo "        Manage the separate GOST TCP proxy; DNS and UDP are not proxied."
+        echo "    oniongate split {status|apps|rules|enable|disable|mode|include|exclude|remove|run|apply}"
+        echo "        Route selected applications only inside an OnionGate systemd cgroup scope."
+        echo "        'split apply' validates settings for the next start; it does not change live firewall rules."
         echo ""
-        echo "Download test defaults to 1 MiB and a 30-second timeout. Configure with:"
+        echo "Download tests default to 1 MiB, three sequential samples, and a 20-second per-download timeout."
         echo "    ONIONGATE_DIAGNOSTICS_URL (HTTPS only)"
         echo "    ONIONGATE_DIAGNOSTICS_BYTES (65536 through 10485760)"
+        echo "    ONIONGATE_DIAGNOSTICS_SAMPLES (1 through 5)"
+        echo ""
+        echo "Split routing requires cgroup v2, systemd user scopes, and iptables cgroup support."
+        echo "Only TCP/DNS can use Tor; selected-app public non-TCP and IPv6 are blocked, and"
+        echo "local/private destinations may remain direct. Use 'split run' to launch apps."
+        echo "Apps that delegate networking to separate services may not be covered."
     fi
     echo ""
 }
@@ -2822,8 +3924,13 @@ main() {
         status)
             cmd_status
             ;;
+        split)
+            shift
+            cmd_split "$@"
+            ;;
         diagnostics)
-            cmd_diagnostics
+            shift
+            cmd_diagnostics "$@"
             ;;
         proxy)
             shift
@@ -2856,6 +3963,7 @@ main() {
             echo "    status          Show OnionGate status"
             echo "    diagnostics     Show Tor bootstrap, circuits, and performance measurements"
             echo "    refresh         Request a new Tor circuit (exit IP may remain unchanged)"
+            echo "    split           Configure cgroup-scoped application split tunneling"
             echo "    proxy           Manage the independent GOST high-speed proxy backend"
             echo "    version         Show version information"
             echo "    help            Show instructions"
