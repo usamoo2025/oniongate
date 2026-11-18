@@ -157,6 +157,17 @@ restore_mac_addresses() {
 
 stop_oniongate() {
     if [[ -x "$INSTALL_BIN" ]]; then
+        if grep -qE '^[[:space:]]*proxy\)' "$INSTALL_BIN"; then
+            if "$INSTALL_BIN" proxy stop; then
+                log_success "OnionGate proxy stop command completed."
+            else
+                log_error "OnionGate proxy stop command failed."
+                die "Cannot safely continue uninstall while proxy firewall state may be active."
+            fi
+        else
+            log_warning "Installed CLI predates proxy mode; no proxy-specific cleanup command is available."
+        fi
+
         if "$INSTALL_BIN" stop; then
             log_success "OnionGate stop command completed."
         else

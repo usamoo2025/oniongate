@@ -83,6 +83,12 @@ Run gateway-changing commands with `sudo`:
 | `sudo oniongate status` | Show runtime and connection checks |
 | `sudo oniongate diagnostics` | Inspect Tor bootstrap, circuits, DNS, and measured SOCKS download |
 | `sudo oniongate refresh` | Request a new Tor circuit using ControlPort |
+| `sudo oniongate proxy start` | Start the separate GOST provider-proxy backend |
+| `sudo oniongate proxy stop` | Stop proxy mode and remove only its tagged firewall rules |
+| `sudo oniongate proxy status` | Check proxy process, listeners, and redirection rules |
+| `sudo oniongate proxy reconnect` | Reconnect to the configured endpoint |
+| `sudo oniongate proxy refresh` | Switch to the next configured endpoint and compare observed public IPs |
+| `sudo oniongate proxy diagnostics` | Measure proxy throughput and compare with a direct baseline |
 | `oniongate version` | Show the installed version |
 | `oniongate help` | Show CLI help |
 | `sudo oniongate uninstall` | Uninstall OnionGate while preserving its configuration and data |
@@ -130,6 +136,33 @@ sudo env ONIONGATE_DIAGNOSTICS_URL="https://example.test/download" \
 ```
 
 Use an HTTPS endpoint that supports byte-range requests for a representative bounded test.
+
+## High-speed provider proxy mode
+
+Proxy mode is a separate, optional backend that uses **GOST v3**; it does not send proxy traffic through Tor. Install a trusted [GOST v3 Linux binary/package](https://gost.run/en/) and ensure the `gost` executable is on `PATH`. The standard OnionGate installer does not install GOST. Proxy startup also requires `curl`, `python3`, `ss` (from `iproute2`), and `iptables`; IPv6 redirection requires `ip6tables` and will fail safely if IPv6 is enabled but that utility is unavailable.
+
+The first proxy command creates a protected configuration template. Edit it with provider-supplied values:
+
+```bash
+sudo oniongate proxy start
+sudo nano /etc/oniongate/proxy.conf
+```
+
+Set `PROXY_PROTOCOL` to `socks5` or `http` (HTTP CONNECT), and provide `PROXY_SERVER`, `PROXY_PORT`, and optional paired `PROXY_USERNAME`/`PROXY_PASSWORD`. Credentials stay in the root-owned, mode-600 configuration and generated GOST file. `PROXY_TIMEOUT` sets listener-readiness and OnionGate probe timeouts from 1 to 120 seconds. SOCKS5 and HTTP CONNECT do not necessarily encrypt the connection to the provider; use credentials only with a provider and network you trust. Optional comma-separated `PROXY_ENDPOINTS` entries allow `proxy refresh` to switch among provider-approved endpoints using the configured credentials. IPv6 endpoint entries use `[address]:port`.
+
+Then manage and inspect proxy mode with:
+
+```bash
+sudo oniongate proxy start
+sudo oniongate proxy status
+sudo oniongate proxy diagnostics
+sudo oniongate proxy refresh
+sudo oniongate proxy stop
+```
+
+The backend exposes a loopback SOCKS5 listener on `127.0.0.1:9052` and redirects outbound TCP through OnionGate-specific IPv4 and, when enabled, IPv6 NAT chains. Tor and proxy modes are mutually exclusive. Local/private destinations are excluded from redirection. OnionGate does not change system DNS: DNS queries use the current system resolver and may bypass the provider proxy; UDP traffic other than connections inside the GOST tunnel is not transparently proxied. This is **not** a guarantee that all traffic is protected or proxied.
+
+Startup verifies a public IP through the local SOCKS listener. `proxy refresh` compares the observed IP before and after switching; the IP may remain unchanged, and an endpoint switch is not claimed to change it unless verified. Diagnostics make one bounded download through the proxy and compare it with a single direct baseline captured before proxy startup. The direct baseline contacts the test endpoint without a proxy and can expose the direct IP to that endpoint. Both speeds are measurements of those requests, not guaranteed provider capacity.
 
 ## Desktop GUI
 
@@ -203,6 +236,8 @@ Stop OnionGate if needed:
 sudo oniongate stop
 ```
 
+Stop proxy mode separately with `sudo oniongate proxy stop`.
+
 If a bridge fails, check that its transport is installed and that valid matching bridge lines are present in `/etc/oniongate/oniongate.conf`. Do not flush firewall rules to troubleshoot; doing so could remove rules owned by other applications.
 
 ## Tests
@@ -214,6 +249,8 @@ python3 -m unittest discover -s tests -v
 ```
 
 Tests that require a running Tor daemon, Linux firewall tools, Debian/Arch package managers, or real network paths must be performed on the relevant Linux system. Do not infer Debian or Arch compatibility from tests run on another operating system.
+
+Proxy startup, endpoint authentication and switching, firewall rollback, and real throughput tests additionally require GOST v3, root access to Linux firewall tools, a working provider account, and a network connection.
 
 ## Uninstall
 

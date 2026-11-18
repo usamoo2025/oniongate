@@ -28,12 +28,38 @@ fi
 TOR_UID=""
 TOR_USER=""
 TOR_GROUP=""
-TOR_DNS_PORT="5353"
+TOR_DNS_PORT="5354"
 TOR_TRANS_PORT="9040"
 TOR_SOCKS_PORT="9050"
 TOR_CONTROL_PORT="9051"
 TOR_CONTROL_COOKIE="$ONIONGATE_DIR/data/control_auth_cookie"
 TOR_NEWNYM_COOLDOWN=10
+PROXY_CONFIG="$ONIONGATE_DIR/proxy.conf"
+PROXY_STATE_DIR="$ONIONGATE_DIR/proxy"
+PROXY_GOST_CONFIG="$PROXY_STATE_DIR/gost.yaml"
+PROXY_PID_FILE="$PROXY_STATE_DIR/gost.pid"
+PROXY_STATUS_FILE="$PROXY_STATE_DIR/proxy.status"
+PROXY_FIREWALL_STATE_FILE="$PROXY_STATE_DIR/firewall.state"
+PROXY_ENDPOINT_FILE="$PROXY_STATE_DIR/endpoint.index"
+PROXY_DIRECT_SPEED_FILE="$PROXY_STATE_DIR/direct.speed"
+PROXY_LOG="$PROXY_STATE_DIR/gost.log"
+PROXY_TRANSPARENT_PORT="12345"
+PROXY_SOCKS_PORT="9052"
+PROXY_MARK="20295"
+PROXY_TEST_BYTES="1048576"
+PROXY_PROTOCOL=""
+PROXY_SERVER=""
+PROXY_PORT=""
+PROXY_USERNAME=""
+PROXY_PASSWORD=""
+PROXY_TIMEOUT="10"
+PROXY_DNS_MODE="system"
+PROXY_ENDPOINTS=()
+PROXY_ACTIVE_INDEX=0
+PROXY_GOST_BIN=""
+PROXY_IPV4_CHAIN_CREATED=false
+PROXY_IPV6_CHAIN_CREATED=false
+PROXY_IPV6_ENABLED=false
 
 NON_TOR="127.0.0.0/8 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16"
 
@@ -55,7 +81,7 @@ show_banner() {
     cat << 'EOF'
 
 ╔═══════════════════════════════════════════════╗
-║                    OnionGate                    ║
+║                    OnionGate                  ║
 ║           Anonymous Traffic Gateway           ║
 ╚═══════════════════════════════════════════════╝
 
@@ -146,6 +172,17 @@ is_oniongate_tor_pid() {
 is_running() {
     [[ -r "$ONIONGATE_DIR/tor.pid" ]] || return 1
     is_oniongate_tor_pid "$(<"$ONIONGATE_DIR/tor.pid")"
+}
+
+tor_firewall_is_active() {
+    (command -v iptables >/dev/null 2>&1 &&
+        { iptables -t nat -C OUTPUT -m comment --comment OnionGate-managed \
+            -j ONIONGATE_NAT >/dev/null 2>&1 ||
+          iptables -C OUTPUT -m comment --comment OnionGate-managed \
+            -j ONIONGATE_OUT >/dev/null 2>&1; }) ||
+    (command -v ip6tables >/dev/null 2>&1 &&
+        ip6tables -C OUTPUT -m comment --comment OnionGate-managed \
+            -j ONIONGATE6_OUT >/dev/null 2>&1)
 }
 
 # ============================================
@@ -1029,6 +1066,10 @@ cmd_start() {
         log_info "Run 'sudo oniongate stop' first"
         exit 1
     fi
+    if proxy_is_running || proxy_firewall_is_active; then
+        log_error "OnionGate proxy mode or its firewall rules are active. Stop proxy mode before starting Tor."
+        exit 1
+    fi
     
     if ! check_dependencies; then
         log_info "Attempting to install required dependencies..."
@@ -1585,6 +1626,1022 @@ cmd_refresh() {
     return 1
 }
 
+proxy_write_template() {
+    local directory owner permissions
+    directory=$(dirname "$PROXY_CONFIG")
+    if [[ -L "$directory" || ( -e "$directory" && ! -d "$directory" ) ]]; then
+        log_error "Proxy configuration directory must be a real directory."
+        return 1
+    fi
+    if [[ ! -d "$directory" ]]; then
+        install -d -o root -g root -m 0755 "$directory" || return 1
+    fi
+    owner=$(stat -c '%u' "$directory" 2>/dev/null) || return 1
+    permissions=$(stat -c '%a' "$directory" 2>/dev/null) || return 1
+    if [[ "$owner" != "0" || ! "$permissions" =~ ^[0-7]{3,4}$ ]] ||
+       (( (8#$permissions & 022) != 0 )); then
+        log_error "Proxy configuration directory must be root-owned and not group/world writable."
+        return 1
+    fi
+    if [[ -e "$PROXY_CONFIG" || -L "$PROXY_CONFIG" ]]; then
+        log_error "Proxy configuration already exists or is a symbolic link; it will not be overwritten."
+        return 1
+    fi
+    umask 077
+    cat > "$PROXY_CONFIG" <<'EOF' || return 1
+# OnionGate High-Speed Proxy configuration.
+# Keep this file root-owned with mode 600: credentials are stored here.
+# Choose protocol "socks5" or "http" (HTTP CONNECT).
+PROXY_PROTOCOL=socks5
+PROXY_SERVER=proxy.example.net
+PROXY_PORT=1080
+PROXY_USERNAME=
+PROXY_PASSWORD=
+# Seconds for GOST listener readiness and OnionGate's connection probes (1-120).
+PROXY_TIMEOUT=10
+PROXY_DNS_MODE=system
+# Optional comma-separated provider-approved additional endpoints as host:port.
+# IPv6 endpoints must be bracketed, for example [2001:db8::1]:1080.
+PROXY_ENDPOINTS=
+EOF
+    chmod 0600 "$PROXY_CONFIG" || return 1
+    log_info "Created protected proxy configuration: $PROXY_CONFIG"
+    log_info "Edit it with: sudo nano $PROXY_CONFIG"
+}
+
+proxy_ensure_state_dir() {
+    local owner permissions
+    if [[ -L "$PROXY_STATE_DIR" || ( -e "$PROXY_STATE_DIR" && ! -d "$PROXY_STATE_DIR" ) ]]; then
+        log_error "Proxy state path must be a real directory, not a symbolic link."
+        return 1
+    fi
+    if [[ ! -e "$PROXY_STATE_DIR" ]]; then
+        install -d -o root -g root -m 0700 "$PROXY_STATE_DIR" || return 1
+    fi
+    owner=$(stat -c '%u' "$PROXY_STATE_DIR" 2>/dev/null) || return 1
+    permissions=$(stat -c '%a' "$PROXY_STATE_DIR" 2>/dev/null) || return 1
+    if [[ "$owner" != "0" || ! "$permissions" =~ ^[0-7]{3,4}$ ]]; then
+        log_error "Proxy state directory must be root-owned and inaccessible to group/other users."
+        return 1
+    fi
+    chmod 0700 "$PROXY_STATE_DIR" || return 1
+    return 0
+}
+
+proxy_validate_address() {
+    local address="$1" host port label
+    local -a labels
+    if [[ "$address" =~ ^\[([0-9A-Fa-f:]+)\]:([0-9]{1,5})$ ]]; then
+        host="${BASH_REMATCH[1]}"
+        port="${BASH_REMATCH[2]}"
+        python3 -c 'import ipaddress,sys; ipaddress.IPv6Address(sys.argv[1])' "$host" >/dev/null 2>&1 ||
+            return 1
+    elif [[ "$address" =~ ^([A-Za-z0-9][A-Za-z0-9.-]*):([0-9]{1,5})$ ]]; then
+        host="${BASH_REMATCH[1]}"
+        port="${BASH_REMATCH[2]}"
+        [[ ${#host} -le 253 && "$host" != *..* && "$host" != *. ]] || return 1
+        if [[ "$host" =~ ^[0-9.]+$ ]]; then
+            python3 -c 'import ipaddress,sys; ipaddress.IPv4Address(sys.argv[1])' \
+                "$host" >/dev/null 2>&1 || return 1
+        else
+            IFS='.' read -r -a labels <<< "$host"
+            for label in "${labels[@]}"; do
+                [[ "$label" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$ ]] || return 1
+            done
+        fi
+    else
+        return 1
+    fi
+    (( 10#$port >= 1 && 10#$port <= 65535 )) || return 1
+    PROXY_ENDPOINT_HOST="$host"
+    PROXY_ENDPOINT_PORT="$((10#$port))"
+}
+
+proxy_load_config() {
+    local mode permissions owner line key value endpoint
+    if [[ ! -e "$PROXY_CONFIG" ]]; then
+        proxy_write_template || return 1
+        log_error "Set the provider endpoint and run the proxy command again."
+        return 1
+    fi
+    if [[ -L "$PROXY_CONFIG" || ! -f "$PROXY_CONFIG" ]]; then
+        log_error "Proxy configuration must be a regular file, not a symbolic link."
+        return 1
+    fi
+    owner=$(stat -c '%u' "$PROXY_CONFIG" 2>/dev/null) || {
+        log_error "Could not verify proxy configuration ownership."
+        return 1
+    }
+    permissions=$(stat -c '%a' "$PROXY_CONFIG" 2>/dev/null) || {
+        log_error "Could not verify proxy configuration permissions."
+        return 1
+    }
+    if [[ "$owner" != "0" || ! "$permissions" =~ ^[0-7]{3,4}$ ]] ||
+       (( (8#$permissions & 077) != 0 )); then
+        log_error "Proxy configuration must be owned by root and inaccessible to group/other users (chmod 600)."
+        return 1
+    fi
+
+    PROXY_PROTOCOL=""
+    PROXY_SERVER=""
+    PROXY_PORT=""
+    PROXY_USERNAME=""
+    PROXY_PASSWORD=""
+    PROXY_TIMEOUT="10"
+    PROXY_DNS_MODE="system"
+    PROXY_ENDPOINTS=()
+    local -A seen=()
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        line="${line%$'\r'}"
+        [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
+        if [[ "$line" != *=* ]]; then
+            log_error "Invalid proxy configuration line; expected KEY=VALUE."
+            return 1
+        fi
+        key="${line%%=*}"
+        value="${line#*=}"
+        if [[ ! "$key" =~ ^[A-Z_]+$ ]]; then
+            log_error "Invalid proxy configuration key."
+            return 1
+        fi
+        if [[ -n "${seen[$key]+x}" ]]; then
+            log_error "Duplicate proxy configuration key: $key"
+            return 1
+        fi
+        seen["$key"]=1
+        case "$key" in
+            PROXY_PROTOCOL) PROXY_PROTOCOL="$value" ;;
+            PROXY_SERVER) PROXY_SERVER="$value" ;;
+            PROXY_PORT) PROXY_PORT="$value" ;;
+            PROXY_USERNAME) PROXY_USERNAME="$value" ;;
+            PROXY_PASSWORD) PROXY_PASSWORD="$value" ;;
+            PROXY_TIMEOUT) PROXY_TIMEOUT="$value" ;;
+            PROXY_DNS_MODE) PROXY_DNS_MODE="$value" ;;
+            PROXY_ENDPOINTS)
+                if [[ -n "$value" ]]; then
+                    if [[ "$value" == ,* || "$value" == *, || "$value" == *,,* ]]; then
+                        log_error "PROXY_ENDPOINTS cannot contain an empty entry."
+                        return 1
+                    fi
+                    IFS=',' read -r -a PROXY_ENDPOINTS <<< "$value"
+                fi
+                ;;
+            *)
+                log_error "Unknown proxy configuration key: $key"
+                return 1
+                ;;
+        esac
+    done < "$PROXY_CONFIG"
+
+    if [[ "$PROXY_PROTOCOL" != "socks5" && "$PROXY_PROTOCOL" != "http" ]]; then
+        log_error "PROXY_PROTOCOL must be socks5 or http."
+        return 1
+    fi
+    local server_address
+    if [[ "$PROXY_SERVER" == *:* ]]; then
+        server_address="[$PROXY_SERVER]:$PROXY_PORT"
+    else
+        server_address="$PROXY_SERVER:$PROXY_PORT"
+    fi
+    if [[ "$PROXY_SERVER" == "proxy.example.net" ]]; then
+        server_address=""
+    fi
+    if [[ ! "$PROXY_PORT" =~ ^[0-9]{1,5}$ ]] ||
+       ! proxy_validate_address "$server_address"; then
+        log_error "Set a valid provider hostname/IP and port in $PROXY_CONFIG."
+        return 1
+    fi
+    if [[ -n "$PROXY_USERNAME" && -z "$PROXY_PASSWORD" ]] ||
+       [[ -z "$PROXY_USERNAME" && -n "$PROXY_PASSWORD" ]]; then
+        log_error "Set both PROXY_USERNAME and PROXY_PASSWORD, or leave both empty."
+        return 1
+    fi
+    if [[ "$PROXY_TIMEOUT" =~ ^[0-9]{1,3}$ ]]; then
+        mode=$((10#$PROXY_TIMEOUT))
+    else
+        mode=0
+    fi
+    if (( mode < 1 || mode > 120 )); then
+        log_error "PROXY_TIMEOUT must be between 1 and 120 seconds."
+        return 1
+    fi
+    PROXY_TIMEOUT="$mode"
+    if [[ "$PROXY_DNS_MODE" != "system" ]]; then
+        log_error "Only PROXY_DNS_MODE=system is currently supported; system DNS is left unchanged."
+        return 1
+    fi
+    for endpoint in "${PROXY_ENDPOINTS[@]}"; do
+        if ! proxy_validate_address "$endpoint"; then
+            log_error "Invalid provider-approved PROXY_ENDPOINTS entry: $endpoint"
+            return 1
+        fi
+    done
+    return 0
+}
+
+proxy_endpoint_count() {
+    printf '%s\n' "$(( ${#PROXY_ENDPOINTS[@]} + 1 ))"
+}
+
+proxy_read_endpoint_index() {
+    local count="$1" index=0
+    if [[ -r "$PROXY_ENDPOINT_FILE" && ! -L "$PROXY_ENDPOINT_FILE" ]]; then
+        read -r index < "$PROXY_ENDPOINT_FILE" || index=0
+    fi
+    if [[ ! "$index" =~ ^[0-9]+$ || ${#index} -gt 6 ]] ||
+       (( index >= count )); then
+        index=0
+    fi
+    printf '%s\n' "$index"
+}
+
+proxy_write_endpoint_index() {
+    local index="$1" count temporary_index
+    count=$(proxy_endpoint_count)
+    if [[ ! "$index" =~ ^[0-9]+$ || ${#index} -gt 6 ]] ||
+       (( index >= count )); then
+        log_error "Refusing to store an invalid proxy endpoint index."
+        return 1
+    fi
+    proxy_ensure_state_dir || return 1
+    temporary_index=$(mktemp "$PROXY_STATE_DIR/endpoint.XXXXXX") || return 1
+    if ! printf '%s\n' "$index" > "$temporary_index" ||
+       ! chmod 0600 "$temporary_index" ||
+       ! mv -f -- "$temporary_index" "$PROXY_ENDPOINT_FILE"; then
+        rm -f -- "$temporary_index"
+        log_error "Could not securely store the active proxy endpoint."
+        return 1
+    fi
+    return 0
+}
+
+proxy_write_firewall_state() {
+    local temporary_state
+    proxy_ensure_state_dir || return 1
+    temporary_state=$(mktemp "$PROXY_STATE_DIR/firewall.XXXXXX") || return 1
+    if ! printf 'ipv4=%s\nipv6=%s\n' \
+        "$PROXY_IPV4_CHAIN_CREATED" "$PROXY_IPV6_CHAIN_CREATED" > "$temporary_state" ||
+       ! chmod 0600 "$temporary_state" ||
+       ! mv -f -- "$temporary_state" "$PROXY_FIREWALL_STATE_FILE"; then
+        rm -f -- "$temporary_state"
+        log_error "Could not persist proxy firewall ownership state."
+        return 1
+    fi
+    return 0
+}
+
+proxy_load_firewall_state() {
+    if [[ ! -e "$PROXY_FIREWALL_STATE_FILE" ]]; then
+        return 0
+    fi
+    if [[ -L "$PROXY_FIREWALL_STATE_FILE" || ! -f "$PROXY_FIREWALL_STATE_FILE" ]]; then
+        log_error "Proxy firewall ownership state is not a regular file."
+        return 1
+    fi
+    if grep -qx 'ipv4=true' "$PROXY_FIREWALL_STATE_FILE"; then
+        PROXY_IPV4_CHAIN_CREATED=true
+    elif ! grep -qx 'ipv4=false' "$PROXY_FIREWALL_STATE_FILE"; then
+        log_error "Proxy IPv4 firewall ownership state is invalid."
+        return 1
+    fi
+    if grep -qx 'ipv6=true' "$PROXY_FIREWALL_STATE_FILE"; then
+        PROXY_IPV6_CHAIN_CREATED=true
+        PROXY_IPV6_ENABLED=true
+    elif ! grep -qx 'ipv6=false' "$PROXY_FIREWALL_STATE_FILE"; then
+        log_error "Proxy IPv6 firewall ownership state is invalid."
+        return 1
+    fi
+    return 0
+}
+
+proxy_endpoint_at() {
+    local index="$1"
+    if (( index == 0 )); then
+        if [[ "$PROXY_SERVER" == *:* ]]; then
+            printf '[%s]:%s\n' "$PROXY_SERVER" "$PROXY_PORT"
+        else
+            printf '%s:%s\n' "$PROXY_SERVER" "$PROXY_PORT"
+        fi
+    else
+        printf '%s\n' "${PROXY_ENDPOINTS[$((index - 1))]}"
+    fi
+}
+
+proxy_generate_gost_config() {
+    local endpoint="$1" temporary_config
+    if ! proxy_validate_address "$endpoint"; then
+        log_error "Cannot generate proxy config for an invalid endpoint."
+        return 1
+    fi
+    proxy_ensure_state_dir || return 1
+    temporary_config=$(mktemp "$PROXY_STATE_DIR/gost.yaml.XXXXXX") || return 1
+    chmod 0600 "$temporary_config" || {
+        rm -f -- "$temporary_config"
+        return 1
+    }
+    if ! python3 - "$PROXY_CONFIG" "$PROXY_ENDPOINT_HOST" \
+        "$PROXY_ENDPOINT_PORT" "$temporary_config" "$PROXY_PROTOCOL" \
+        "$PROXY_USERNAME" "$PROXY_PASSWORD" "$PROXY_MARK" \
+        "$PROXY_IPV6_ENABLED" "$PROXY_TRANSPARENT_PORT" \
+        "$PROXY_SOCKS_PORT" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+config_path, host, port, output_path, protocol, username, password, mark, ipv6_enabled, red_port, socks_port = sys.argv[1:]
+address = f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
+connector = "socks5" if protocol == "socks5" else "http"
+lines = [
+    "services:",
+    "- name: oniongate-transparent",
+    f"  addr: {json.dumps(f'127.0.0.1:{red_port}')}",
+    "  handler:",
+    "    type: red",
+    "    chain: oniongate-upstream",
+    "    metadata:",
+    "      sniffing: true",
+    "      sniffing.fallback: true",
+    "  listener:",
+    "    type: red",
+    "- name: oniongate-local-socks",
+    f"  addr: {json.dumps(f'127.0.0.1:{socks_port}')}",
+    "  handler:",
+    "    type: socks5",
+    "    chain: oniongate-upstream",
+    "  listener:",
+    "    type: tcp",
+    "chains:",
+    "- name: oniongate-upstream",
+    "  hops:",
+    "  - name: oniongate-hop",
+    "    sockopts:",
+    f"      mark: {mark}",
+    "    nodes:",
+    "    - name: provider",
+    f"      addr: {json.dumps(address)}",
+    "      connector:",
+    f"        type: {connector}",
+]
+if ipv6_enabled == "true":
+    lines[11:11] = [
+        "- name: oniongate-transparent-ipv6",
+        f"  addr: {json.dumps(f'[::1]:{red_port}')}",
+        "  handler:",
+        "    type: red",
+        "    chain: oniongate-upstream",
+        "    metadata:",
+        "      sniffing: true",
+        "      sniffing.fallback: true",
+        "  listener:",
+        "    type: red",
+    ]
+if username or password:
+    lines.extend(
+        [
+            "        auth:",
+            f"          username: {json.dumps(username)}",
+            f"          password: {json.dumps(password)}",
+        ]
+    )
+lines.extend(["      dialer:", "        type: tcp", ""])
+path = Path(output_path)
+path.write_text("\n".join(lines), encoding="utf-8")
+path.chmod(0o600)
+PY
+    then
+        rm -f -- "$temporary_config"
+        log_error "Failed to write the protected GOST configuration."
+        return 1
+    fi
+    mv -f -- "$temporary_config" "$PROXY_GOST_CONFIG" || {
+        rm -f -- "$temporary_config"
+        return 1
+    }
+    chmod 0600 "$PROXY_GOST_CONFIG"
+}
+
+proxy_is_running() {
+    local pid
+    [[ -r "$PROXY_PID_FILE" && ! -L "$PROXY_PID_FILE" ]] || return 1
+    pid=$(<"$PROXY_PID_FILE")
+    [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+    kill -0 "$pid" 2>/dev/null || return 1
+    [[ -r "/proc/$pid/cmdline" ]] || return 1
+    grep -zFq -- "$PROXY_GOST_CONFIG" "/proc/$pid/cmdline"
+}
+
+proxy_firewall_is_active() {
+    (command -v iptables >/dev/null 2>&1 &&
+        iptables -t nat -C OUTPUT -m comment --comment OnionGate-managed \
+            -j ONIONGATE_PROXY_NAT >/dev/null 2>&1) ||
+    (command -v ip6tables >/dev/null 2>&1 &&
+        ip6tables -t nat -C OUTPUT -m comment --comment OnionGate-managed \
+            -j ONIONGATE_PROXY6_NAT >/dev/null 2>&1)
+}
+
+proxy_firewall_ready() {
+    local ipv6_disabled
+    if [[ -r /proc/sys/net/ipv6/conf/lo/disable_ipv6 ]]; then
+        ipv6_disabled=$(</proc/sys/net/ipv6/conf/lo/disable_ipv6)
+        if [[ "$ipv6_disabled" == "0" && "$PROXY_IPV6_ENABLED" != "true" ]]; then
+            return 1
+        fi
+    elif [[ "$PROXY_IPV6_ENABLED" != "true" ]]; then
+        return 1
+    fi
+    iptables -t nat -C OUTPUT -m comment --comment OnionGate-managed \
+        -j ONIONGATE_PROXY_NAT >/dev/null 2>&1 &&
+    iptables -t nat -C ONIONGATE_PROXY_NAT -p tcp \
+        -m comment --comment OnionGate-managed -j REDIRECT \
+        --to-ports "$PROXY_TRANSPARENT_PORT" >/dev/null 2>&1 || return 1
+    if [[ "$PROXY_IPV6_ENABLED" == "true" ]]; then
+        ip6tables -t nat -C OUTPUT -m comment --comment OnionGate-managed \
+            -j ONIONGATE_PROXY6_NAT >/dev/null 2>&1 &&
+        ip6tables -t nat -C ONIONGATE_PROXY6_NAT -p tcp \
+            -m comment --comment OnionGate-managed -j REDIRECT \
+            --to-ports "$PROXY_TRANSPARENT_PORT" >/dev/null 2>&1 || return 1
+    fi
+}
+
+proxy_remove_firewall_chain() {
+    local binary="$1" chain="$2" created="$3"
+    if ! command -v "$binary" >/dev/null 2>&1 ||
+       ! "$binary" -t nat -S "$chain" >/dev/null 2>&1; then
+        return 0
+    fi
+    if [[ "$created" == "true" ]] ||
+       "$binary" -t nat -C "$chain" -m comment --comment OnionGate-owned \
+           -j RETURN >/dev/null 2>&1; then
+        remove_owned_chain "$binary" nat OUTPUT "$chain" RETURN "$created"
+    elif "$binary" -t nat -C OUTPUT -m comment --comment OnionGate-managed \
+         -j "$chain" >/dev/null 2>&1; then
+        log_error "Unmarked $chain is hooked into OUTPUT; leaving it untouched and keeping GOST running."
+        return 1
+    else
+        log_warning "Leaving unmarked, unhooked $chain untouched."
+    fi
+}
+
+proxy_stop_process() {
+    local pid
+    if [[ ! -r "$PROXY_PID_FILE" ]]; then
+        return 0
+    fi
+    pid=$(<"$PROXY_PID_FILE")
+    if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
+        if ! proxy_is_running; then
+            log_error "Proxy PID file does not identify OnionGate's GOST process; refusing to signal PID $pid."
+            return 1
+        fi
+        kill -TERM "$pid" || return 1
+        for _ in {1..20}; do
+            kill -0 "$pid" 2>/dev/null || break
+            sleep 0.25
+        done
+        if kill -0 "$pid" 2>/dev/null; then
+            kill -KILL "$pid" || return 1
+        fi
+    fi
+    rm -f -- "$PROXY_PID_FILE"
+    return 0
+}
+
+proxy_wait_ready() {
+    local elapsed=0
+    while (( elapsed < PROXY_TIMEOUT )); do
+        if ! proxy_is_running; then
+            log_error "GOST exited during startup; inspect $PROXY_LOG (credentials are stored separately)."
+            return 1
+        fi
+        if ss -H -ltn 2>/dev/null |
+            awk -v socks="127.0.0.1:$PROXY_SOCKS_PORT" \
+                -v red="127.0.0.1:$PROXY_TRANSPARENT_PORT" \
+                -v red6="[::1]:$PROXY_TRANSPARENT_PORT" \
+                -v require6="$PROXY_IPV6_ENABLED" \
+                '$4 == socks { have_socks=1 } $4 == red { have_red=1 } $4 == red6 { have_red6=1 } END { exit !(have_socks && have_red && (!require6 || have_red6)) }'; then
+            return 0
+        fi
+        sleep 1
+        elapsed=$((elapsed + 1))
+    done
+    log_error "GOST listeners did not become ready within ${PROXY_TIMEOUT}s."
+    return 1
+}
+
+proxy_start_process() {
+    local endpoint="$1"
+    local ipv6_disabled=0
+    PROXY_GOST_BIN=$(command -v gost || true)
+    if [[ -z "$PROXY_GOST_BIN" ]]; then
+        log_error "GOST v3 is required for proxy mode and was not found in PATH."
+        log_info "Install a trusted GOST v3 Linux package/binary, then retry."
+        return 1
+    fi
+    if ! command -v curl >/dev/null 2>&1 ||
+       ! command -v python3 >/dev/null 2>&1; then
+        log_error "Proxy mode requires curl and python3 for connectivity checks and protected GOST configuration."
+        return 1
+    fi
+    PROXY_IPV6_ENABLED=false
+    if [[ -r /proc/sys/net/ipv6/conf/lo/disable_ipv6 ]]; then
+        ipv6_disabled=$(</proc/sys/net/ipv6/conf/lo/disable_ipv6)
+        [[ "$ipv6_disabled" == "0" ]] && PROXY_IPV6_ENABLED=true
+    else
+        PROXY_IPV6_ENABLED=true
+    fi
+    if ! proxy_generate_gost_config "$endpoint"; then
+        return 1
+    fi
+    : > "$PROXY_LOG" || return 1
+    chmod 0600 "$PROXY_LOG" || return 1
+    "$PROXY_GOST_BIN" -C "$PROXY_GOST_CONFIG" >>"$PROXY_LOG" 2>&1 </dev/null &
+    local pid=$!
+    printf '%s\n' "$pid" > "$PROXY_PID_FILE" || {
+        kill -TERM "$pid" 2>/dev/null || true
+        return 1
+    }
+    chmod 0600 "$PROXY_PID_FILE" || {
+        proxy_stop_process || true
+        return 1
+    }
+    proxy_wait_ready || {
+        proxy_stop_process || true
+        return 1
+    }
+}
+
+proxy_add_firewall() {
+    local net
+    if ! command -v iptables >/dev/null 2>&1; then
+        log_error "Proxy mode requires iptables for its dedicated IPv4 rules."
+        return 1
+    fi
+    if [[ "$PROXY_IPV6_ENABLED" == "true" ]] &&
+       ! command -v ip6tables >/dev/null 2>&1; then
+        log_error "IPv6 is enabled, but ip6tables is unavailable; refusing to leave IPv6 traffic unproxied."
+        return 1
+    fi
+    if iptables -t nat -S ONIONGATE_PROXY_NAT >/dev/null 2>&1; then
+        if ! iptables -t nat -C ONIONGATE_PROXY_NAT \
+            -m comment --comment OnionGate-owned -j RETURN >/dev/null 2>&1; then
+            log_error "Existing ONIONGATE_PROXY_NAT chain is unmarked; leaving it untouched."
+            return 1
+        fi
+        remove_owned_chain iptables nat OUTPUT ONIONGATE_PROXY_NAT RETURN false || return 1
+    fi
+    if ip6tables -t nat -S ONIONGATE_PROXY6_NAT >/dev/null 2>&1; then
+        if ! ip6tables -t nat -C ONIONGATE_PROXY6_NAT \
+            -m comment --comment OnionGate-owned -j RETURN >/dev/null 2>&1; then
+            log_error "Existing ONIONGATE_PROXY6_NAT chain is unmarked; leaving it untouched."
+            return 1
+        fi
+        remove_owned_chain ip6tables nat OUTPUT ONIONGATE_PROXY6_NAT RETURN false || return 1
+    fi
+    iptables -t nat -N ONIONGATE_PROXY_NAT || return 1
+    PROXY_IPV4_CHAIN_CREATED=true
+    proxy_write_firewall_state || return 1
+    iptables -t nat -A ONIONGATE_PROXY_NAT -d 127.0.0.0/8 \
+        -m comment --comment OnionGate-managed -j RETURN || return 1
+    for net in 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 169.254.0.0/16 \
+        100.64.0.0/10 224.0.0.0/4 240.0.0.0/4; do
+        iptables -t nat -A ONIONGATE_PROXY_NAT -d "$net" \
+            -m comment --comment OnionGate-managed -j RETURN || return 1
+    done
+    iptables -t nat -A ONIONGATE_PROXY_NAT -m mark --mark "$PROXY_MARK" \
+        -m comment --comment OnionGate-managed -j RETURN || return 1
+    iptables -t nat -A ONIONGATE_PROXY_NAT -p tcp \
+        -m multiport --dports "$PROXY_TRANSPARENT_PORT,$PROXY_SOCKS_PORT" \
+        -m comment --comment OnionGate-managed -j RETURN || return 1
+    iptables -t nat -A ONIONGATE_PROXY_NAT -p tcp \
+        -m comment --comment OnionGate-managed -j REDIRECT \
+        --to-ports "$PROXY_TRANSPARENT_PORT" || return 1
+    iptables -t nat -A ONIONGATE_PROXY_NAT \
+        -m comment --comment OnionGate-owned -j RETURN || return 1
+    iptables -t nat -I OUTPUT 1 \
+        -m comment --comment OnionGate-managed -j ONIONGATE_PROXY_NAT || return 1
+
+    if [[ "$PROXY_IPV6_ENABLED" == "true" ]]; then
+        ip6tables -t nat -N ONIONGATE_PROXY6_NAT || return 1
+        PROXY_IPV6_CHAIN_CREATED=true
+        proxy_write_firewall_state || return 1
+        ip6tables -t nat -A ONIONGATE_PROXY6_NAT -d ::/128 \
+            -m comment --comment OnionGate-managed -j RETURN || return 1
+        ip6tables -t nat -A ONIONGATE_PROXY6_NAT -d ::1/128 \
+            -m comment --comment OnionGate-managed -j RETURN || return 1
+        for net in fc00::/7 fe80::/10 ff00::/8; do
+            ip6tables -t nat -A ONIONGATE_PROXY6_NAT -d "$net" \
+                -m comment --comment OnionGate-managed -j RETURN || return 1
+        done
+        ip6tables -t nat -A ONIONGATE_PROXY6_NAT -m mark --mark "$PROXY_MARK" \
+            -m comment --comment OnionGate-managed -j RETURN || return 1
+        ip6tables -t nat -A ONIONGATE_PROXY6_NAT -p tcp \
+            -m multiport --dports "$PROXY_TRANSPARENT_PORT,$PROXY_SOCKS_PORT" \
+            -m comment --comment OnionGate-managed -j RETURN || return 1
+        ip6tables -t nat -A ONIONGATE_PROXY6_NAT -p tcp \
+            -m comment --comment OnionGate-managed -j REDIRECT \
+            --to-ports "$PROXY_TRANSPARENT_PORT" || return 1
+        ip6tables -t nat -A ONIONGATE_PROXY6_NAT \
+            -m comment --comment OnionGate-owned -j RETURN || return 1
+        ip6tables -t nat -I OUTPUT 1 \
+            -m comment --comment OnionGate-managed -j ONIONGATE_PROXY6_NAT || return 1
+    fi
+    PROXY_IPV4_CHAIN_CREATED=false
+    PROXY_IPV6_CHAIN_CREATED=false
+    rm -f -- "$PROXY_FIREWALL_STATE_FILE"
+}
+
+proxy_remove_firewall() {
+    local failed=0
+    proxy_load_firewall_state || return 1
+    if ! command -v iptables >/dev/null 2>&1; then
+        if [[ -e "$PROXY_STATUS_FILE" || -e "$PROXY_PID_FILE" ||
+              "$PROXY_IPV4_CHAIN_CREATED" == "true" || "$PROXY_IPV6_CHAIN_CREATED" == "true" ]]; then
+            log_error "iptables is unavailable; refusing to stop GOST while proxy firewall rules may remain."
+            return 1
+        fi
+        return 0
+    fi
+    if [[ "$PROXY_IPV6_ENABLED" == "true" || "$PROXY_IPV6_CHAIN_CREATED" == "true" ]] &&
+       ! command -v ip6tables >/dev/null 2>&1; then
+        log_error "ip6tables is unavailable; refusing to stop GOST while IPv6 proxy rules may remain."
+        return 1
+    fi
+    proxy_remove_firewall_chain iptables ONIONGATE_PROXY_NAT \
+        "$PROXY_IPV4_CHAIN_CREATED" || failed=1
+    if command -v ip6tables >/dev/null 2>&1; then
+        proxy_remove_firewall_chain ip6tables ONIONGATE_PROXY6_NAT \
+            "$PROXY_IPV6_CHAIN_CREATED" || failed=1
+    fi
+    if [[ "$failed" == "0" ]]; then
+        PROXY_IPV4_CHAIN_CREATED=false
+        PROXY_IPV6_CHAIN_CREATED=false
+        rm -f -- "$PROXY_FIREWALL_STATE_FILE"
+    else
+        proxy_write_firewall_state || log_error "Could not update proxy firewall ownership state after partial cleanup."
+    fi
+    return "$failed"
+}
+
+proxy_public_ip() {
+    local ip
+    ip=$(curl --silent --fail --connect-timeout "$PROXY_TIMEOUT" \
+        --max-time "$((PROXY_TIMEOUT + 5))" \
+        --socks5-hostname "127.0.0.1:$PROXY_SOCKS_PORT" \
+        https://api.ipify.org 2>/dev/null) || return 1
+    python3 -c 'import ipaddress,sys; print(ipaddress.ip_address(sys.argv[1].strip()))' "$ip" 2>/dev/null
+}
+
+proxy_measure_speed() {
+    local route="$1" output_file="$2" metrics duration size speed
+    local -a route_args=()
+    if [[ "$route" == "proxy" ]]; then
+        route_args=(--socks5-hostname "127.0.0.1:$PROXY_SOCKS_PORT")
+    else
+        route_args=(--noproxy '*')
+    fi
+    if ! metrics=$(curl --silent --fail --location --max-redirs 3 \
+        --connect-timeout "$PROXY_TIMEOUT" --max-time 30 \
+        --max-filesize "$PROXY_TEST_BYTES" --range "0-$((PROXY_TEST_BYTES - 1))" \
+        "${route_args[@]}" --output "$output_file" \
+        --write-out $'%{time_total}\t%{size_download}\t%{speed_download}' \
+        "https://speed.cloudflare.com/__down?bytes=$PROXY_TEST_BYTES" 2>/dev/null); then
+        return 1
+    fi
+    IFS=$'\t' read -r duration size speed <<< "$metrics"
+    [[ "$duration" =~ ^[0-9]+([.][0-9]+)?$ &&
+       "$size" =~ ^[0-9]+([.][0-9]+)?$ &&
+       "$speed" =~ ^[0-9]+([.][0-9]+)?$ ]] || return 1
+    printf '%s\t%s\t%s\n' "$duration" "$size" "$speed"
+}
+
+cmd_proxy_start() {
+    check_root
+    if is_running || tor_firewall_is_active; then
+        log_error "Tor is active. Stop Tor before starting proxy mode to prevent proxy traffic from being routed through Tor."
+        return 1
+    fi
+    if proxy_is_running; then
+        if [[ ! -r "$PROXY_STATUS_FILE" ]] ||
+           ! grep -qE '^running ipv6=(true|false)$' "$PROXY_STATUS_FILE"; then
+            log_error "GOST is running without a valid OnionGate status record; stop it safely before retrying."
+            return 1
+        fi
+        if grep -q '^running ipv6=true$' "$PROXY_STATUS_FILE"; then
+            PROXY_IPV6_ENABLED=true
+        fi
+        if proxy_firewall_ready; then
+            log_warning "OnionGate proxy is already running and its firewall rules are active."
+            return 0
+        fi
+        log_error "GOST is running, but proxy firewall rules are incomplete; run 'sudo oniongate proxy stop' before retrying."
+        return 1
+    fi
+    proxy_load_config || return 1
+    PROXY_GOST_BIN=$(command -v gost || true)
+    if [[ -z "$PROXY_GOST_BIN" ]]; then
+        log_error "GOST v3 is required for proxy mode and was not found in PATH."
+        log_info "Install a trusted GOST v3 Linux package/binary, then retry."
+        return 1
+    fi
+    if ! command -v curl >/dev/null 2>&1 ||
+       ! command -v python3 >/dev/null 2>&1; then
+        log_error "Proxy mode requires curl and python3 for connectivity checks and protected GOST configuration."
+        return 1
+    fi
+    if ! command -v ss >/dev/null 2>&1; then
+        log_error "The ss utility is required to verify proxy listeners."
+        return 1
+    fi
+    proxy_ensure_state_dir || return 1
+
+    local endpoint_count active_index endpoint before_ip temp_file direct_metrics
+    endpoint_count=$(proxy_endpoint_count)
+    active_index=$(proxy_read_endpoint_index "$endpoint_count")
+    endpoint=$(proxy_endpoint_at "$active_index")
+    PROXY_ACTIVE_INDEX="$active_index"
+
+    if command -v curl >/dev/null 2>&1; then
+        temp_file=$(mktemp "${TMPDIR:-/tmp}/oniongate-direct.XXXXXX") || return 1
+        if direct_metrics=$(proxy_measure_speed direct "$temp_file"); then
+            if ! printf '%s\n' "$direct_metrics" > "$PROXY_DIRECT_SPEED_FILE" ||
+               ! chmod 0600 "$PROXY_DIRECT_SPEED_FILE"; then
+                rm -f -- "$PROXY_DIRECT_SPEED_FILE"
+                log_warning "Direct speed baseline could not be stored securely."
+            fi
+        else
+            rm -f -- "$PROXY_DIRECT_SPEED_FILE"
+            log_warning "Direct speed baseline unavailable; proxy mode will still start."
+        fi
+        rm -f -- "$temp_file"
+    fi
+
+    log_info "Starting GOST system-wide transparent TCP proxy to configured endpoint $endpoint."
+    log_warning "System DNS remains unchanged and may bypass the provider proxy; non-TCP UDP is not proxied."
+    proxy_start_process "$endpoint" || return 1
+    if ! proxy_public_ip > "$PROXY_STATE_DIR/observed_ip.tmp"; then
+        log_error "Proxy endpoint did not return a verifiable public IP; rolling back."
+        proxy_stop_process || true
+        return 1
+    fi
+    before_ip=$(<"$PROXY_STATE_DIR/observed_ip.tmp")
+    rm -f -- "$PROXY_STATE_DIR/observed_ip.tmp"
+
+    if ! printf 'running ipv6=%s\n' "$PROXY_IPV6_ENABLED" > "$PROXY_STATUS_FILE" ||
+       ! chmod 0600 "$PROXY_STATUS_FILE"; then
+        log_error "Could not securely record proxy startup state; stopping GOST before firewall changes."
+        proxy_stop_process || log_error "Could not stop GOST after status-file creation failed."
+        rm -f -- "$PROXY_STATUS_FILE"
+        return 1
+    fi
+    if ! proxy_add_firewall; then
+        log_error "Could not safely install the OnionGate-owned proxy firewall rules; rolling back."
+        if proxy_remove_firewall; then
+            if proxy_stop_process; then
+                rm -f -- "$PROXY_STATUS_FILE"
+            else
+                log_error "Firewall rollback succeeded, but GOST remains running; retry 'sudo oniongate proxy stop'."
+            fi
+        else
+            log_error "Firewall rollback was incomplete; GOST remains running to serve any active redirections. Retry 'sudo oniongate proxy stop'."
+        fi
+        return 1
+    fi
+    if ! proxy_write_endpoint_index "$active_index"; then
+        if proxy_remove_firewall; then
+            if proxy_stop_process; then
+                rm -f -- "$PROXY_STATUS_FILE"
+            else
+                log_error "Firewall rollback succeeded, but GOST remains running; retry 'sudo oniongate proxy stop'."
+            fi
+        else
+            log_error "Firewall rollback was incomplete; GOST remains running to serve any active redirections. Retry 'sudo oniongate proxy stop'."
+        fi
+        return 1
+    fi
+    log_success "Proxy mode is active; verified provider public IP: $before_ip."
+    log_info "Local SOCKS5 listener: 127.0.0.1:$PROXY_SOCKS_PORT"
+    log_info "Transparent TCP listener: managed through OnionGate-owned firewall chains."
+    log_warning "DNS follows the existing system resolver and may bypass the proxy."
+}
+
+cmd_proxy_stop() {
+    check_root
+    if [[ -r "$PROXY_STATUS_FILE" ]] &&
+       grep -q '^running ipv6=true$' "$PROXY_STATUS_FILE"; then
+        PROXY_IPV6_ENABLED=true
+    fi
+    proxy_remove_firewall || {
+        log_error "Proxy firewall rules remain active; GOST will stay running rather than strand redirected traffic."
+        return 1
+    }
+    proxy_stop_process || {
+        log_error "Proxy process could not be stopped safely; retaining its configuration for recovery."
+        return 1
+    }
+    rm -f -- "$PROXY_STATUS_FILE" "$PROXY_ENDPOINT_FILE" \
+        "$PROXY_DIRECT_SPEED_FILE" "$PROXY_GOST_CONFIG"
+    log_success "Proxy mode stopped; only OnionGate-owned proxy rules were removed."
+}
+
+cmd_proxy_status() {
+    check_root
+    if ! proxy_load_config; then
+        log_error "Proxy configuration is unavailable or invalid."
+        return 1
+    fi
+    if ! proxy_is_running; then
+        log_info "Proxy mode is inactive."
+        return 1
+    fi
+    if [[ ! -r "$PROXY_STATUS_FILE" ]] ||
+       ! grep -qE '^running ipv6=(true|false)$' "$PROXY_STATUS_FILE"; then
+        log_error "Proxy process is running without a valid OnionGate status record."
+        return 1
+    fi
+    grep -q '^running ipv6=true$' "$PROXY_STATUS_FILE" && PROXY_IPV6_ENABLED=true
+    if ! proxy_firewall_ready; then
+        log_error "GOST is running, but the OnionGate TCP redirection rules are not fully active."
+        return 1
+    fi
+    local endpoint index
+    index=0
+    index=$(proxy_read_endpoint_index "$(proxy_endpoint_count)")
+    endpoint=$(proxy_endpoint_at "$index")
+    diagnostics_check_listener "Proxy local SOCKS5" "$PROXY_SOCKS_PORT" || return 1
+    local public_ip
+    if ! public_ip=$(proxy_public_ip); then
+        log_error "GOST and firewall rules are active, but the upstream proxy is not responding."
+        return 1
+    fi
+    log_success "Proxy mode is active through $endpoint (PID $(<"$PROXY_PID_FILE")); verified public IP: $public_ip."
+    log_info "DNS mode: system (DNS may bypass the provider proxy)."
+}
+
+cmd_proxy_diagnostics() {
+    check_root
+    proxy_load_config || return 1
+    if ! proxy_is_running; then
+        log_error "Proxy mode is not running. Start it with 'sudo oniongate proxy start'."
+        return 1
+    fi
+    if [[ ! -r "$PROXY_STATUS_FILE" ]] ||
+       ! grep -qE '^running ipv6=(true|false)$' "$PROXY_STATUS_FILE"; then
+        log_error "Proxy process is running without a valid OnionGate status record."
+        return 1
+    fi
+    grep -q '^running ipv6=true$' "$PROXY_STATUS_FILE" && PROXY_IPV6_ENABLED=true
+    local failed=0 public_ip temporary_file proxy_metrics direct_metrics dns_result
+    local duration size speed
+    diagnostics_check_listener "Proxy local SOCKS5" "$PROXY_SOCKS_PORT" || failed=1
+    if ! proxy_firewall_ready; then
+        log_error "OnionGate-owned transparent TCP firewall rules are missing or incomplete."
+        failed=1
+    fi
+    if public_ip=$(proxy_public_ip); then
+        log_success "Verified public IP through proxy: $public_ip"
+    else
+        log_error "Could not verify public IP through proxy."
+        failed=1
+    fi
+    dns_result=$(getent ahostsv4 api.ipify.org 2>/dev/null | head -n 1 || true)
+    if [[ -n "$dns_result" ]]; then
+        log_info "System DNS resolution succeeded; DNS is not routed through the proxy."
+    else
+        log_warning "System DNS resolution failed."
+        failed=1
+    fi
+    temporary_file=$(mktemp "${TMPDIR:-/tmp}/oniongate-proxy-speed.XXXXXX") || return 1
+    if ! chmod 0600 "$temporary_file"; then
+        rm -f -- "$temporary_file"
+        log_error "Could not secure the proxy diagnostics temporary file."
+        return 1
+    fi
+    if proxy_metrics=$(proxy_measure_speed proxy "$temporary_file"); then
+        IFS=$'\t' read -r duration size speed <<< "$proxy_metrics"
+        log_success "Measured proxy download: $size bytes in $duration seconds ($speed bytes/s)."
+    else
+        log_error "Proxy download measurement failed."
+        failed=1
+    fi
+    rm -f -- "$temporary_file"
+    if [[ -r "$PROXY_DIRECT_SPEED_FILE" ]]; then
+        direct_metrics=$(<"$PROXY_DIRECT_SPEED_FILE")
+        IFS=$'\t' read -r duration size speed <<< "$direct_metrics"
+        log_info "Direct baseline captured before proxy start: $size bytes in $duration seconds ($speed bytes/s)."
+        if [[ -n "${proxy_metrics:-}" ]]; then
+            local direct_mib proxy_mib
+            direct_mib=$(awk -v value="$speed" 'BEGIN { printf "%.3f", value / 1048576 }')
+            IFS=$'\t' read -r duration size speed <<< "$proxy_metrics"
+            proxy_mib=$(awk -v value="$speed" 'BEGIN { printf "%.3f", value / 1048576 }')
+            log_info "Comparison: direct ${direct_mib} MiB/s; proxy ${proxy_mib} MiB/s."
+        fi
+    else
+        log_warning "No direct speed baseline was captured before proxy activation."
+    fi
+    log_warning "Speed values are measurements of one HTTPS download, not guaranteed provider capacity."
+    log_warning "DNS remains direct/system-configured and may bypass proxy routing."
+    if (( failed == 0 )); then
+        return 0
+    fi
+    return 1
+}
+
+cmd_proxy_refresh() {
+    check_root
+    proxy_load_config || return 1
+    if ! proxy_is_running; then
+        log_error "Proxy mode is not running. Start it before switching endpoints."
+        return 1
+    fi
+    local count old_index new_index old_endpoint new_endpoint before_ip after_ip
+    count=$(proxy_endpoint_count)
+    old_index=$(proxy_read_endpoint_index "$count")
+    if [[ ! -r "$PROXY_STATUS_FILE" ]] ||
+       ! grep -qE '^running ipv6=(true|false)$' "$PROXY_STATUS_FILE"; then
+        log_error "Proxy state record is missing or invalid; refusing to switch endpoints."
+        return 1
+    fi
+    grep -q '^running ipv6=true$' "$PROXY_STATUS_FILE" && PROXY_IPV6_ENABLED=true
+    if ! proxy_firewall_ready; then
+        log_error "Proxy firewall rules are incomplete; refusing to switch endpoints."
+        return 1
+    fi
+    if (( count < 2 )); then
+        log_error "No alternative provider-approved endpoint is configured."
+        log_info "Add entries to PROXY_ENDPOINTS in $PROXY_CONFIG before switching."
+        return 1
+    fi
+    if ! before_ip=$(proxy_public_ip); then
+        log_error "Current proxy public IP could not be verified; refusing to switch blindly."
+        return 1
+    fi
+    new_index=$(((old_index + 1) % count))
+    old_endpoint=$(proxy_endpoint_at "$old_index")
+    new_endpoint=$(proxy_endpoint_at "$new_index")
+    log_info "Switching from configured endpoint $old_endpoint to $new_endpoint."
+    proxy_stop_process || return 1
+    if proxy_start_process "$new_endpoint" &&
+       after_ip=$(proxy_public_ip) &&
+       proxy_write_endpoint_index "$new_index"; then
+        if [[ "$before_ip" == "$after_ip" ]]; then
+            log_warning "Endpoint switched, but the verified public IP remained $after_ip."
+        else
+            log_success "Verified public IP changed from $before_ip to $after_ip."
+        fi
+        return 0
+    fi
+    log_error "Alternative endpoint failed; restoring the previous endpoint."
+    if ! proxy_stop_process; then
+        log_error "Could not stop the failed endpoint safely; current proxy state and firewall rules were retained."
+        return 1
+    fi
+    if proxy_start_process "$old_endpoint"; then
+        if proxy_write_endpoint_index "$old_index"; then
+            log_warning "Previous proxy endpoint restored."
+        else
+            log_error "Previous endpoint is running, but its index could not be stored; firewall rules were retained."
+        fi
+        return 1
+    fi
+    log_error "Could not restore the previous endpoint; removing proxy firewall rules to avoid redirection to a dead listener."
+    proxy_remove_firewall || true
+    rm -f -- "$PROXY_STATUS_FILE"
+    return 1
+}
+
+cmd_proxy() {
+    local action="${1:-}"
+    case "$action" in
+        start)
+            cmd_proxy_start
+            ;;
+        stop)
+            cmd_proxy_stop
+            ;;
+        reconnect)
+            check_root
+            proxy_load_config || return 1
+            if proxy_is_running; then
+                proxy_stop_process || return 1
+            fi
+            cmd_proxy_start
+            ;;
+        status)
+            cmd_proxy_status
+            ;;
+        refresh)
+            cmd_proxy_refresh
+            ;;
+        diagnostics)
+            cmd_proxy_diagnostics
+            ;;
+        *)
+            log_error "Usage: oniongate proxy {start|stop|reconnect|status|refresh|diagnostics}"
+            return 2
+            ;;
+    esac
+}
+
 cmd_version() {
     show_banner
     echo "    OnionGate V$VERSION"
@@ -1608,6 +2665,7 @@ COMMANDS:
     status          Show OnionGate status
     diagnostics     Show Tor process, bootstrap, circuits, and speed measurements
     refresh         Request a new Tor circuit (exit IP may remain unchanged)
+    proxy           Manage the independent GOST high-speed proxy backend
     version         Show version information
     help            Show instructions
     uninstall       Remove OnionGate from system
@@ -1629,6 +2687,8 @@ EXAMPLES:
     oniongate diagnostics
     sudo oniongate diagnostics
     oniongate refresh
+    sudo oniongate proxy start
+    sudo oniongate proxy diagnostics
 
 Diagnostics performs one bounded SOCKS download. Defaults: 1 MiB and 30 seconds.
 Override with ONIONGATE_DIAGNOSTICS_URL (HTTPS only) and
@@ -1664,6 +2724,8 @@ EOF
         echo "ADDITIONAL COMMAND:"
         echo "    oniongate diagnostics"
         echo "        Read Tor bootstrap and circuits, test DNS, and perform one bounded SOCKS download."
+        echo "    oniongate proxy {start|stop|reconnect|status|refresh|diagnostics}"
+        echo "        Manage the separate GOST TCP proxy; DNS and UDP are not proxied."
         echo ""
         echo "Download test defaults to 1 MiB and a 30-second timeout. Configure with:"
         echo "    ONIONGATE_DIAGNOSTICS_URL (HTTPS only)"
@@ -1679,6 +2741,7 @@ cmd_uninstall() {
     
     log_info "Uninstalling OnionGate..."
     
+    cmd_proxy_stop || return 1
     stop_tor || return 1
     restore_all_backups || return 1
     rm -f -- "$STATUS_FILE"
@@ -1762,6 +2825,10 @@ main() {
         diagnostics)
             cmd_diagnostics
             ;;
+        proxy)
+            shift
+            cmd_proxy "$@"
+            ;;
         refresh)
             cmd_refresh
             ;;
@@ -1789,6 +2856,7 @@ main() {
             echo "    status          Show OnionGate status"
             echo "    diagnostics     Show Tor bootstrap, circuits, and performance measurements"
             echo "    refresh         Request a new Tor circuit (exit IP may remain unchanged)"
+            echo "    proxy           Manage the independent GOST high-speed proxy backend"
             echo "    version         Show version information"
             echo "    help            Show instructions"
             echo "    uninstall       Remove OnionGate from system"
@@ -1809,6 +2877,8 @@ main() {
             echo "    oniongate stop"
             echo "    oniongate diagnostics"
             echo "    oniongate refresh"
+            echo "    sudo oniongate proxy start"
+            echo "    sudo oniongate proxy diagnostics"
             exit 1
             ;;
     esac
